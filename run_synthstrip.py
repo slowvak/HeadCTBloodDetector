@@ -162,19 +162,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "  python run_synthstrip.py -i brain.nii.gz\n"
             "  python run_synthstrip.py -i brain.nii.gz -o stripped.nii.gz -m mask.nii.gz\n"
             "  python run_synthstrip.py -i brain.nii.gz --gpu --no-csf\n"
-            "  python run_synthstrip.py --input-dir /path/to/nifti_folder\n"
+            "  python run_synthstrip.py -i /path/to/nifti_folder\n"
         ),
     )
-    group = parser.add_mutually_exclusive_group(required=True)
-    group.add_argument(
+    parser.add_argument(
         "-i", "--input",
+        required=True,
         type=Path,
-        help="Path to a single input NIfTI file (.nii or .nii.gz).",
-    )
-    group.add_argument(
-        "--input-dir",
-        type=Path,
-        help="Path to a directory of NIfTI files to batch-process.",
+        help="Input NIfTI file or directory of NIfTI files.",
     )
     parser.add_argument(
         "-o", "--output",
@@ -233,13 +228,10 @@ def main(argv: list[str] | None = None) -> int:
     # --- Resolve synthstrip command -------------------------------------------
     synthstrip_cmd = ensure_synthstrip(args.synthstrip_cmd)
 
-    # --- Single-file mode -----------------------------------------------------
-    if args.input is not None:
-        input_path = args.input.resolve()
-        if not input_path.is_file():
-            print(f"ERROR: Input file not found: {input_path}", file=sys.stderr)
-            return 1
+    input_path = args.input.resolve()
 
+    # --- Single-file mode -----------------------------------------------------
+    if input_path.is_file():
         output_path, mask_path = build_output_paths(
             input_path, args.output, args.mask
         )
@@ -255,18 +247,17 @@ def main(argv: list[str] | None = None) -> int:
         return result.returncode
 
     # --- Batch / directory mode -----------------------------------------------
-    input_dir = args.input_dir.resolve()
-    if not input_dir.is_dir():
-        print(f"ERROR: Directory not found: {input_dir}", file=sys.stderr)
+    if not input_path.is_dir():
+        print(f"ERROR: Not a file or directory: {input_path}", file=sys.stderr)
         return 1
 
-    nifti_files = collect_nifti_files(input_dir)
+    nifti_files = collect_nifti_files(input_path)
     if not nifti_files:
-        print(f"No .nii / .nii.gz files found in {input_dir}", file=sys.stderr)
+        print(f"No .nii / .nii.gz files found in {input_path}", file=sys.stderr)
         return 1
 
     total = len(nifti_files)
-    succeeded, failed, skipped = 0, 0, 0
+    succeeded, failed = 0, 0
 
     for idx, nii_path in enumerate(nifti_files, 1):
         print(f"\n{'═' * 60}")
@@ -274,12 +265,6 @@ def main(argv: list[str] | None = None) -> int:
         print(f"{'═' * 60}")
 
         out_path, msk_path = build_output_paths(nii_path, None, None)
-
-        # Skip if outputs already exist
-        if out_path.exists() and msk_path.exists():
-            print(f"  ⏭  Outputs already exist, skipping.")
-            skipped += 1
-            continue
 
         result = run_synthstrip(
             input_path=nii_path,
@@ -296,7 +281,7 @@ def main(argv: list[str] | None = None) -> int:
             failed += 1
 
     print(f"\n{'═' * 60}")
-    print(f"  BATCH COMPLETE: {succeeded} ok / {failed} failed / {skipped} skipped  (total {total})")
+    print(f"  BATCH COMPLETE: {succeeded} ok / {failed} failed  (total {total})")
     print(f"{'═' * 60}")
 
     return 1 if failed else 0

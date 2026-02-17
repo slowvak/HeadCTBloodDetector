@@ -1,0 +1,10 @@
+[project]
+name = "head-ct-blood-detector"
+version = "0.1.0"
+description = "Head CT blood detection pipeline"
+requires-python = ">=3.9"
+dependencies = [
+    "nibabel",
+    "numpy",
+    "scipy",
+]

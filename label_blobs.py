@@ -278,9 +278,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     p.add_argument("-i", "--input", required=True, type=Path,
-                   help="Input NIfTI file (.nii or .nii.gz).")
+                   help="Input NIfTI file or directory of NIfTI files.")
     p.add_argument("-o", "--output", type=Path, default=None,
-                   help="Output label map. Default: <input>_blobs.<ext>")
+                   help="Output label map (single-file mode only).")
     p.add_argument("--threshold", type=float, default=75.0,
                    help="Intensity threshold (default: 75).")
     p.add_argument("--min-cc", type=float, default=1.0,
@@ -288,15 +288,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return p.parse_args(argv)
 
 
-def main(argv: list[str] | None = None) -> int:
-    args = parse_args(argv)
-
-    input_path = args.input.resolve()
-    if not input_path.is_file():
-        print(f"ERROR: File not found: {input_path}", file=sys.stderr)
-        return 1
-
-    output_path = build_output_path(input_path, args.output)
+def process_single_file(
+    input_path: Path,
+    output_path: Path | None,
+    threshold: float,
+    min_cc: float,
+) -> int:
+    """Run the full pipeline on one NIfTI file. Returns 0 on success."""
+    output_path = build_output_path(input_path, output_path)
 
     print(f"Loading {input_path.name} …")
     img = nib.load(str(input_path))
@@ -308,8 +307,8 @@ def main(argv: list[str] | None = None) -> int:
 
     ranked_labels, filtered, binary = process(
         data, affine,
-        threshold=args.threshold,
-        min_cc=args.min_cc,
+        threshold=threshold,
+        min_cc=min_cc,
     )
 
     # Save label map
@@ -318,12 +317,12 @@ def main(argv: list[str] | None = None) -> int:
     nib.save(out_img, str(output_path))
     print(f"\n✓ Label map saved to {output_path}")
 
-    # Compute stats & write CSV (named after the parent folder)
+    # Compute stats & write CSV
     if ranked_labels.max() > 0:
         print("\nComputing per-object statistics …")
         rows = compute_blob_stats(
             ranked_labels, data, affine,
-            threshold=args.threshold,
+            threshold=threshold,
         )
         # Derive CSV name from input file basename
         stem = input_path.name
@@ -350,6 +349,63 @@ def main(argv: list[str] | None = None) -> int:
                   f"{r['mean density']:>8.1f}")
 
     return 0
+
+
+def collect_nifti_files(directory: Path) -> list[Path]:
+    """Return sorted .nii/.nii.gz files, excluding generated outputs."""
+    files = sorted(
+        p for p in directory.iterdir()
+        if p.name.endswith(".nii") or p.name.endswith(".nii.gz")
+    )
+    return [
+        p for p in files
+        if not any(tag in p.name for tag in ("_blobs", "_mask", "_stripped"))
+    ]
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
+    input_path = args.input.resolve()
+
+    # --- Single file mode -----------------------------------------------------
+    if input_path.is_file():
+        return process_single_file(
+            input_path, args.output, args.threshold, args.min_cc,
+        )
+
+    # --- Directory / batch mode -----------------------------------------------
+    if not input_path.is_dir():
+        print(f"ERROR: Not a file or directory: {input_path}", file=sys.stderr)
+        return 1
+
+    nifti_files = collect_nifti_files(input_path)
+    if not nifti_files:
+        print(f"No .nii/.nii.gz files found in {input_path}", file=sys.stderr)
+        return 1
+
+    total = len(nifti_files)
+    succeeded, failed = 0, 0
+
+    for idx, nii_path in enumerate(nifti_files, 1):
+        print(f"\n{'═' * 60}")
+        print(f"  [{idx}/{total}]  {nii_path.name}")
+        print(f"{'═' * 60}")
+        try:
+            rc = process_single_file(
+                nii_path, None, args.threshold, args.min_cc,
+            )
+            if rc == 0:
+                succeeded += 1
+            else:
+                failed += 1
+        except Exception as exc:
+            print(f"  ERROR: {exc}", file=sys.stderr)
+            failed += 1
+
+    print(f"\n{'═' * 60}")
+    print(f"  BATCH COMPLETE: {succeeded} ok / {failed} failed  (total {total})")
+    print(f"{'═' * 60}")
+    return 1 if failed else 0
 
 
 if __name__ == "__main__":
