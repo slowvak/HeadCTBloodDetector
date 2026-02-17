@@ -40,7 +40,8 @@ def volume_per_voxel_cc(affine: np.ndarray) -> float:
 def process(
     data: np.ndarray,
     affine: np.ndarray,
-    threshold: float = 75.0,
+    min_threshold: float = 75.0,
+    max_threshold: float = 75.0,
     min_cc: float = 1.0,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
@@ -68,7 +69,7 @@ def process(
     filtered = median_filter(data.astype(np.float32), size=3)
 
     # ── 2. Threshold ─────────────────────────────────────────────────────
-    binary = (filtered >= threshold).astype(np.int32)
+    binary = ((filtered >= min_threshold) & (filtered <= max_threshold)).astype(np.int32)
 
     # ── 3. Connected-component labelling (26-connected) ──────────────────
     labelled, n_objects = label(binary, structure=STRUCT_26)
@@ -281,17 +282,21 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                    help="Input NIfTI file or directory of NIfTI files.")
     p.add_argument("-o", "--output", type=Path, default=None,
                    help="Output label map (single-file mode only).")
-    p.add_argument("--threshold", type=float, default=75.0,
-                   help="Intensity threshold (default: 75).")
+    p.add_argument("--min_threshold", type=float, default=75.0,
+                   help="Minimum intensity threshold (default: 75).")
+    p.add_argument("--max_threshold", type=float, default=250.0,
+                   help="Maximum intensity threshold (default: 250).")
     p.add_argument("--min-cc", type=float, default=1.0,
                    help="Minimum object volume in cc to keep (default: 1.0).")
     return p.parse_args(argv)
+    
 
 
 def process_single_file(
     input_path: Path,
     output_path: Path | None,
-    threshold: float,
+    min_threshold: float,
+    max_threshold: float,
     min_cc: float,
 ) -> int:
     """Run the full pipeline on one NIfTI file. Returns 0 on success."""
@@ -307,7 +312,8 @@ def process_single_file(
 
     ranked_labels, filtered, binary = process(
         data, affine,
-        threshold=threshold,
+        min_threshold=min_threshold,
+        max_threshold=max_threshold,
         min_cc=min_cc,
     )
 
@@ -370,7 +376,7 @@ def main(argv: list[str] | None = None) -> int:
     # --- Single file mode -----------------------------------------------------
     if input_path.is_file():
         return process_single_file(
-            input_path, args.output, args.threshold, args.min_cc,
+            input_path, args.output, args.min_threshold, args.max_threshold, args.min_cc,
         )
 
     # --- Directory / batch mode -----------------------------------------------
@@ -392,7 +398,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"{'═' * 60}")
         try:
             rc = process_single_file(
-                nii_path, None, args.threshold, args.min_cc,
+                nii_path, None, args.min_threshold, args.max_threshold, args.min_cc,
             )
             if rc == 0:
                 succeeded += 1
