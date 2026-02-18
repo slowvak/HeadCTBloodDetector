@@ -1,0 +1,6 @@
+[console_scripts]
+blast-ct = blast_ct.console_tool:console_tool
+blast-ct-convert-mlx = blast_ct.mlx_convert:convert_saved_models
+blast-ct-inference = blast_ct.inference:inference
+blast-ct-mlx = blast_ct.mlx_console_tool:console_tool_mlx
+blast-ct-train = blast_ct.train:train

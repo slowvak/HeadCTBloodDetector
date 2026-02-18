@@ -1,0 +1,7 @@
+scipy
+numpy
+pandas
+SimpleITK>=2.0
+torch
+tensorboard
+mlx
