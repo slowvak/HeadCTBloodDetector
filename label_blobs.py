@@ -11,7 +11,9 @@ Usage
 ─────
     python label_blobs.py -i input.nii.gz
     python label_blobs.py -i input.nii.gz -o labels.nii.gz
-    python label_blobs.py -i input.nii.gz --threshold 80 --min-cc 0.5
+    python label_blobs.py -i input.nii.gz
+    python label_blobs.py -i input.nii.gz -o labels.nii.gz
+    python label_blobs.py -i input.nii.gz --min-cc 0.5
 """
 
 from __future__ import annotations
@@ -23,11 +25,22 @@ from pathlib import Path
 
 import nibabel as nib
 import numpy as np
-from scipy.ndimage import median_filter, label, sum as ndsum, center_of_mass
+from scipy.ndimage import median_filter, label, sum as ndsum, center_of_mass, binary_fill_holes
 
 
 # 26-connected structuring element (3×3×3 cube of ones)
 STRUCT_26 = np.ones((3, 3, 3), dtype=np.int32)
+
+# Tissue HU Thresholds (Global)
+MIN_WATER = -10
+MAX_WATER = 14
+
+MIN_BRAIN = MAX_WATER
+MAX_BRAIN = 45
+
+MIN_BLOOD = MAX_BRAIN
+MAX_BLOOD = 150   # User requested 170 as an upper threshold
+
 
 
 def volume_per_voxel_cc(affine: np.ndarray) -> float:
@@ -40,50 +53,69 @@ def volume_per_voxel_cc(affine: np.ndarray) -> float:
 def process(
     data: np.ndarray,
     affine: np.ndarray,
-    min_threshold: float = 75.0,
-    max_threshold: float = 75.0,
     min_cc: float = 1.0,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """
+    Apply median filter and segment into Water, Brain, and Blood.
+
     Parameters
     ----------
     data : 3-D ndarray
-        Raw voxel intensities (e.g. HU from a CT).
+        Raw voxel intensities (HU).
     affine : 4×4 ndarray
-        NIfTI affine (used to compute voxel volume).
-    threshold : float
-        Intensity threshold applied after the median filter.
+        NIfTI affine.
     min_cc : float
-        Minimum object volume in cubic centimetres to keep.
+        Minimum object volume (cc) to keep for the *Blood* mask.
 
     Returns
     -------
-    ranked_labels : 3-D ndarray (int32)
-        Size-ranked label map (1 = largest, 0 = background).
+    ranked_blood : 3-D ndarray (int32)
+        Size-ranked label map for Blood (40-90 HU).
+    water_mask : 3-D ndarray (int32)
+        Binary mask for Water (-10 to 20 HU).
+    brain_mask : 3-D ndarray (int32)
+        Binary mask for Brain (15 to 40 HU).
     filtered : 3-D ndarray (float32)
-        Median-filtered image (used later for mean density).
-    binary : 3-D ndarray (int32)
-        Binary mask after threshold.
+        Median-filtered image (used for stats).
     """
     # ── 1. Median filter (3×3×3) ─────────────────────────────────────────
-    filtered = median_filter(data.astype(np.float32), size=3)
+    # ── 1. Median filter (5x5x5) ─────────────────────────────────────────
+    # Clip data to avoid bone blooming, then filter
+    # A. Segmentation Filter: Mask out bone to prevent blooming into blood
+    seg_input = data.copy()
+    
+    # Mask out anything above MAX_BLOOD (e.g. 170) to avoid blooming.
+    seg_input[seg_input > MAX_BLOOD] = 0  # mask bone/calcification
+    filtered = median_filter(seg_input.astype(np.float32), size=5)
 
-    # ── 2. Threshold ─────────────────────────────────────────────────────
-    binary = ((filtered >= min_threshold) & (filtered <= max_threshold)).astype(np.int32)
+    # ── 2. Thresholds for specific tissues ───────────────────────────────
+    water_mask = ((filtered >= MIN_WATER) & (filtered <= MAX_WATER)).astype(np.int32)
+    brain_mask = ((filtered >= MIN_BRAIN) & (filtered <= MAX_BRAIN)).astype(np.int32)
+    blood_mask = ((filtered >= MIN_BLOOD) & (filtered <= MAX_BLOOD)).astype(np.int32)
 
-    # ── 3. Connected-component labelling (26-connected) ──────────────────
-    labelled, n_objects = label(binary, structure=STRUCT_26)
-    print(f"  Components found after threshold: {n_objects}")
+    # ── 2b. Filter Water: Keep only water 'contained' in brain ───────────
+    # Create a "Brain Envelope" by taking Brain + Blood and filling holes (ventricles).
+    # This ensures we keep internal CSF but remove external background noise.
+    solid_tissue = (brain_mask | blood_mask).astype(bool)
+    # Fill holes in 3D to capture ventricles surrounded by brain
+    brain_envelope = binary_fill_holes(solid_tissue)
+    
+    # Restrict water mask to this envelope
+    water_mask = (water_mask & brain_envelope).astype(np.int32)
+
+    # ── 3. Blood: Connected-component labelling (26-connected) ───────────
+    labelled, n_objects = label(blood_mask, structure=STRUCT_26)
+    print(f"  Blood components found ({MIN_BLOOD}-{MAX_BLOOD} HU): {n_objects}")
 
     if n_objects == 0:
         empty = np.zeros_like(data, dtype=np.int32)
-        return empty, filtered, binary
+        return empty, water_mask, brain_mask, filtered
 
     component_ids = np.arange(1, n_objects + 1)
 
     # ── 4. Measure each component's size (in voxels & cc) ────────────────
     vox_cc = volume_per_voxel_cc(affine)
-    sizes_vox = ndsum(binary, labelled, component_ids).astype(int)
+    sizes_vox = ndsum(blood_mask, labelled, component_ids).astype(int)
     sizes_cc = sizes_vox * vox_cc
 
     # ── 5. Remove objects < min_cc ───────────────────────────────────────
@@ -95,7 +127,7 @@ def process(
 
     if len(kept_ids) == 0:
         empty = np.zeros_like(data, dtype=np.int32)
-        return empty, filtered, binary
+        return empty, water_mask, brain_mask, filtered
 
     # ── 6. Sort remaining by size (descending) ───────────────────────────
     sort_order = np.argsort(-kept_sizes)   # largest first
@@ -113,7 +145,7 @@ def process(
     for rank, (cid, sz) in enumerate(zip(kept_ids, kept_sizes), start=1):
         print(f"  {rank:>4}  {sz:>8}  {sz * vox_cc:>11.2f}")
 
-    return output, filtered, binary
+    return output, water_mask, brain_mask, filtered
 
 
 # ---------------------------------------------------------------------------
@@ -134,7 +166,8 @@ def compute_blob_stats(
     ranked_labels: np.ndarray,
     original_data: np.ndarray,
     affine: np.ndarray,
-    threshold: float,
+    brain_mask: np.ndarray,
+    water_mask: np.ndarray,
 ) -> list[dict]:
     """
     Compute per-object statistics for every labelled blob.
@@ -148,8 +181,10 @@ def compute_blob_stats(
         for distinguishing brain vs non-brain).
     affine : 4×4 array
         NIfTI affine.
-    threshold : float
-        The same intensity threshold used in `process()`.
+    brain_mask : 3-D int32 array
+        Binary mask for Brain tissue.
+    water_mask : 3-D int32 array
+        Binary mask for Water.
 
     Returns
     -------
@@ -194,6 +229,7 @@ def compute_blob_stats(
         total_surface = 0.0
         contact_nonbrain = 0.0
         contact_brain = 0.0
+        contact_water = 0.0
 
         # axis, direction (+1 / -1), face area for that axis
         neighbors = [
@@ -224,15 +260,27 @@ def compute_blob_stats(
 
             # Classify the neighbour voxels at exposed faces
             # Get the neighbour values (shift original_data the same way)
+            shifted_brain = np.roll(brain_mask, shift=direction, axis=axis)
+            shifted_brain[tuple(boundary_slice)] = 0
+
+            shifted_water = np.roll(water_mask, shift=direction, axis=axis)
+            shifted_water[tuple(boundary_slice)] = 0
+
             shifted_orig = np.roll(original_data, shift=direction, axis=axis)
             shifted_orig[tuple(boundary_slice)] = 0  # treat boundary as 0
 
-            neighbour_vals = shifted_orig[exposed]
-            n_nonbrain = int((neighbour_vals == 0).sum())
-            n_brain = int(((neighbour_vals > 0) & (neighbour_vals < threshold)).sum())
+            # Get values of neighbours at the exposed faces
+            vals_brain = shifted_brain[exposed]
+            vals_water = shifted_water[exposed]
+            vals_orig = shifted_orig[exposed]
 
-            contact_nonbrain += n_nonbrain * face_area
+            n_brain = int((vals_brain > 0).sum())
+            n_water = int((vals_water > 0).sum())
+            n_nonbrain = int((vals_orig == 0).sum())
+
             contact_brain += n_brain * face_area
+            contact_water += n_water * face_area
+            contact_nonbrain += n_nonbrain * face_area
 
         rows.append({
             "index":                        idx,
@@ -240,6 +288,7 @@ def compute_blob_stats(
             "surface area":                 round(total_surface, 2),
             "contact area with non-brain":  round(contact_nonbrain, 2),
             "contact area with brain":      round(contact_brain, 2),
+            "contact area with water":      round(contact_water, 2),
             "X":                            round(frac_x, 4),
             "Y":                            round(frac_y, 4),
             "Z":                            round(frac_z, 4),
@@ -281,11 +330,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("-i", "--input", required=True, type=Path,
                    help="Input NIfTI file or directory of NIfTI files.")
     p.add_argument("-o", "--output", type=Path, default=None,
-                   help="Output label map (single-file mode only).")
-    p.add_argument("--min_threshold", type=float, default=75.0,
-                   help="Minimum intensity threshold (default: 75).")
-    p.add_argument("--max_threshold", type=float, default=250.0,
-                   help="Maximum intensity threshold (default: 250).")
+                   help="Output blood label map (single-file mode only).")
     p.add_argument("--min-cc", type=float, default=1.0,
                    help="Minimum object volume in cc to keep (default: 1.0).")
     return p.parse_args(argv)
@@ -295,8 +340,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def process_single_file(
     input_path: Path,
     output_path: Path | None,
-    min_threshold: float,
-    max_threshold: float,
     min_cc: float,
 ) -> int:
     """Run the full pipeline on one NIfTI file. Returns 0 on success."""
@@ -310,25 +353,45 @@ def process_single_file(
     print(f"  Shape: {data.shape}   Voxel size: "
           f"{np.abs(np.diag(affine[:3,:3])).round(2)} mm")
 
-    ranked_labels, filtered, binary = process(
+    ranked_blood, water_mask, brain_mask, filtered = process(
         data, affine,
-        min_threshold=min_threshold,
-        max_threshold=max_threshold,
         min_cc=min_cc,
     )
 
-    # Save label map
-    out_img = nib.Nifti1Image(ranked_labels, affine, img.header)
+    # Save Blood label map
+    out_img = nib.Nifti1Image(ranked_blood, affine, img.header)
     out_img.header.set_data_dtype(np.int32)
     nib.save(out_img, str(output_path))
-    print(f"\n✓ Label map saved to {output_path}")
+    print(f"\n✓ Blood label map saved to {output_path}")
 
-    # Compute stats & write CSV
-    if ranked_labels.max() > 0:
-        print("\nComputing per-object statistics …")
+    # Save Water mask
+    water_path = output_path.parent / f"{output_path.stem.replace('_blobs', '')}_water.nii.gz"
+    if water_path.name.endswith(".gz.nii.gz"):  # fix double ext specific case
+         water_path = output_path.parent / f"{output_path.stem.replace('_blobs', '')[:-4]}_water.nii.gz"
+
+    # Cleaner path derivation for aux files:
+    base_name = output_path.name.replace("_blobs.nii.gz", "").replace("_blobs.nii", "")
+    water_path = output_path.parent / f"{base_name}_water.nii.gz"
+    brain_path = output_path.parent / f"{base_name}_brain.nii.gz"
+
+    nib.save(nib.Nifti1Image(water_mask, affine, img.header), str(water_path))
+    print(f"✓ Water mask saved to {water_path}")
+
+    nib.save(nib.Nifti1Image(brain_mask, affine, img.header), str(brain_path))
+    print(f"✓ Brain mask saved to {brain_path}")
+
+    # Save Filtered image
+    filt_path = output_path.parent / f"{base_name}_filtered.nii.gz"
+    nib.save(nib.Nifti1Image(filtered, affine, img.header), str(filt_path))
+    print(f"✓ Filtered image saved to {filt_path}")
+
+    # Compute stats & write CSV (only for labeled blood blobs)
+    if ranked_blood.max() > 0:
+        print("\nComputing per-object statistics (for Blood) …")
         rows = compute_blob_stats(
-            ranked_labels, data, affine,
-            threshold=threshold,
+            ranked_blood, data, affine,
+            brain_mask=brain_mask,
+            water_mask=water_mask,
         )
         # Derive CSV name from input file basename
         stem = input_path.name
@@ -341,32 +404,39 @@ def process_single_file(
 
         # Print a readable summary
         print(f"\n  {'Idx':>3}  {'Vol mm³':>9}  {'SurfA':>8}  "
-              f"{'NonBr':>8}  {'Brain':>8}  "
+              f"{'NonBr':>8}  {'Brain':>8}  {'Water':>8}  "
               f"{'X':>6}  {'Y':>6}  {'Z':>6}  {'Density':>8}")
         print(f"  {'───':>3}  {'───────':>9}  {'─────':>8}  "
-              f"{'─────':>8}  {'─────':>8}  "
+              f"{'─────':>8}  {'─────':>8}  {'─────':>8}  "
               f"{'──':>6}  {'──':>6}  {'──':>6}  {'───────':>8}")
         for r in rows:
             print(f"  {r['index']:>3}  {r['Volume']:>9.1f}  "
                   f"{r['surface area']:>8.1f}  "
                   f"{r['contact area with non-brain']:>8.1f}  "
                   f"{r['contact area with brain']:>8.1f}  "
+                  f"{r['contact area with water']:>8.1f}  "
                   f"{r['X']:>6.3f}  {r['Y']:>6.3f}  {r['Z']:>6.3f}  "
                   f"{r['mean density']:>8.1f}")
 
     return 0
 
 
+import re
+
+def natural_sort_key(s: str) -> list[str | int]:
+    """Sort strings containing numbers naturally (e.g. 2 < 10)."""
+    return [int(text) if text.isdigit() else text.lower()
+            for text in re.split(r'(\d+)', s)]
+
+
 def collect_nifti_files(directory: Path) -> list[Path]:
-    """Return sorted .nii/.nii.gz files, excluding generated outputs."""
-    files = sorted(
+    """Return sorted .nii/.nii.gz files that end with _stripped, in numerical order."""
+    files = [
         p for p in directory.iterdir()
-        if p.name.endswith(".nii") or p.name.endswith(".nii.gz")
-    )
-    return [
-        p for p in files
-        if not any(tag in p.name for tag in ("_blobs", "_mask", "_stripped"))
+        if (p.name.endswith("_stripped.nii") or p.name.endswith("_stripped.nii.gz"))
     ]
+    files.sort(key=lambda p: natural_sort_key(p.name))
+    return files
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -376,7 +446,7 @@ def main(argv: list[str] | None = None) -> int:
     # --- Single file mode -----------------------------------------------------
     if input_path.is_file():
         return process_single_file(
-            input_path, args.output, args.min_threshold, args.max_threshold, args.min_cc,
+            input_path, args.output, args.min_cc,
         )
 
     # --- Directory / batch mode -----------------------------------------------
@@ -398,7 +468,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"{'═' * 60}")
         try:
             rc = process_single_file(
-                nii_path, None, args.min_threshold, args.max_threshold, args.min_cc,
+                nii_path, None, args.min_cc,
             )
             if rc == 0:
                 succeeded += 1

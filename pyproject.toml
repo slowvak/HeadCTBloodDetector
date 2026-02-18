@@ -7,4 +7,9 @@ dependencies = [
     "nibabel",
     "numpy",
     "scipy",
+    "mlx",
+    "blast-ct",
 ]
+
+[tool.uv.sources]
+blast-ct = { path = "blast-ct" }
