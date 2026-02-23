@@ -6,7 +6,7 @@
 		}
 	},
 	"data": {
-		"class_names": ["foreground", "IPH", "EAH", "oedema", "IVH"],
+		"class_names": ["background", "IPH", "EAH", "edema", "IVH", "SAH"],
 		"task": "segmentation",
 		"channels": ["image"],
 		"target": "target",

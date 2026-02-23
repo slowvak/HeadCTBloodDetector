@@ -114,19 +114,19 @@ class ConditionalPatchSampler(StochasticPatchSampler):
         return mask
 
 
-class ForegroundBackgroundPatchSampler(StochasticPatchSampler):
+class backgroundBackgroundPatchSampler(StochasticPatchSampler):
     def __init__(self, image_patch_shape, target_patch_shape,
-                 foreground_probability=.5, augmentation=None, n_tries=3):
+                 background_probability=.5, augmentation=None, n_tries=3):
         super().__init__(image_patch_shape, target_patch_shape, augmentation)
-        self.foreground_probability = foreground_probability
+        self.background_probability = background_probability
         self.n_tries = n_tries
 
     def get_sampling_mask(self, target, mask):
         # try sampling points from a random label a maximum of n_tries
         for i in range(self.n_tries):
-            is_foreground = np.random.choice((False, True),
-                                             p=(1 - self.foreground_probability, self.foreground_probability))
-            if is_foreground:
+            is_background = np.random.choice((False, True),
+                                             p=(1 - self.background_probability, self.background_probability))
+            if is_background:
                 sampling_mask = np.logical_and(target != 0, mask)
             else:
                 sampling_mask = np.logical_and(target == 0, mask)

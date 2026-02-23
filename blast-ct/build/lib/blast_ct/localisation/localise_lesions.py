@@ -14,7 +14,7 @@ class LesionVolumeLocalisationMNI(object):
         roi_dictionary = pd.read_csv(roi_dictionary_csv)
         self.roi_dictionary = \
             {name: label for name, label in zip(roi_dictionary['ROIName'], roi_dictionary['ROIIndex'])}
-        self.class_names = ['background', 'iph', 'eah', 'oedema', 'ivh']
+        self.class_names = ['background', 'iph', 'eah', 'edema', 'ivh', 'sah']
         self.native_space = native_space
         self.localisation_dir = localisation_dir
         self.label_map_name = label_map_name

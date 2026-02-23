@@ -1,0 +1,33 @@
+Config num_classes: 6
+Config class_names: ['background', 'IPH', 'EAH', 'edema', 'IVH', 'SAH']
+
+Input patch : (110, 110, 110)  (1,331,000 voxels)
+Output patch: (30, 30, 30)  (27,000 voxels)
+
+image  shape : torch.Size([4, 1, 110, 110, 110])   dtype: torch.float32
+target shape : torch.Size([4, 30, 30, 30])  dtype: torch.int64
+mask   shape : torch.Size([4, 30, 30, 30])   dtype: torch.float32
+target unique values : [0, 2, 3]
+target has nan       : False
+target min/max       : 0 / 3
+mask unique (<=20)   : [0.0, 1.0]
+
+logits shape : torch.Size([4, 6, 30, 30, 30])
+pred   shape : torch.Size([4, 30, 30, 30])
+pred   unique: [0, 1, 2, 3, 4, 5]
+
+target == pred shape match: True
+  Valid target voxels: 108000 / 108000
+
+Confusion matrix:
+[[17368  3607  7264   829   402 70283]
+ [    0     0     0     0     0     0]
+ [    1     0    15     0     0    37]
+ [  573   129   622   235     0  6635]
+ [    0     0     0     0     0     0]
+ [    0     0     0     0     0     0]]
+Row sums (target class counts): [99753, 0, 53, 8194, 0, 0]
+Col sums (pred class counts)  : [17942, 3736, 7901, 1064, 402, 76955]
+41, 2677]
+DONE
+DONE

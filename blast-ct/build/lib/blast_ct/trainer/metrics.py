@@ -189,7 +189,7 @@ class ClassificationMetrics(RunningConfusionMatrix):
 
 class SegmentationMetrics(ClassificationMetrics):
     def __init__(self, device, class_names):
-        class_names[0] = 'Foreground'
+        class_names[0] = 'background'
         super().__init__(device, class_names)
 
     @staticmethod

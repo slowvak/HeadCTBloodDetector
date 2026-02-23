@@ -1,0 +1,93 @@
+{
+  "model": {
+    "DeepMedic": {
+      "fully_connected": [250, 250],
+      "feature_maps": [30, 30, 40, 40, 40, 40, 50, 50]
+    }
+  },
+  "data": {
+    "class_names": ["background", "IPH", "EAH", "edema", "IVH", "SAH"],
+    "task": "segmentation",
+    "channels": ["image"],
+    "target": "target",
+    "sampling_mask": "sampling_mask",
+    "resolution": [1.0, 1.0, 1.0],
+    "transformation": {
+      "IntensityWindowNormalization": {
+        "lower_bound": -15.0,
+        "upper_bound": 100.0
+      }
+    },
+    "input_channels": 1,
+    "num_classes": 6
+  },
+  "training": {
+    "batch_size": 4,
+    "patches_per_image": 10,
+    "images_per_epoch": 10,
+    "input_patch_size": [110, 110, 110],
+    "sampler": {
+      "ConditionalPatchSampler": {
+        "class_probabilities": [0.1, 0.18, 0.18, 0.18, 0.18, 0.18],
+        "n_tries": 50
+      }
+    },
+    "augmentation": {
+      "RandomElasticDeformationCoarsePerlinNoise": {
+        "period": [5, 5, 5],
+        "prob": 0.3,
+        "alpha": 10.0,
+        "noise_shape": [400, 400, 400],
+        "num_maps": 3
+      }
+    },
+    "patch_augmentation": {
+      "RandomHistogramDeformation": {
+        "prob": 0.5
+      },
+      "RandomPatchRotation": {
+        "prob": 0.5,
+        "allowed_planes": [[2, 1]]
+      },
+      "RandomPatchFlip": {
+        "prob": 0.5,
+        "allowed_axis": [2, 1]
+      }
+    },
+    "num_workers": 0,
+    "max_cases_in_memory": 10
+  },
+  "valid": {
+    "batch_size": 8,
+    "input_patch_size": [110, 110, 110],
+    "patches_per_image": 20,
+    "images_per_epoch": 10,
+    "num_workers": 0,
+    "max_cases_in_memory": 2,
+    "eval_every": 10,
+    "keep_model_every": 50
+  },
+  "test": {
+    "batch_size": 8,
+    "input_patch_size": [110, 110, 110],
+    "num_workers": 0,
+    "eval_every": 100
+  },
+  "loss": {
+    "CrossEntropyLoss": {}
+  },
+  "optimizer": {
+    "RMSprop": {
+      "lr": 0.0001,
+      "momentum": 0.6,
+      "alpha": 0.9,
+      "weight_decay": 1e-4
+    }
+  },
+  "scheduler": {
+    "MultiStepLR": {
+      "milestones": [60, 90, 120],
+      "gamma": 0.5
+    }
+  }
+}

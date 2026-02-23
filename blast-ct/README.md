@@ -23,11 +23,12 @@ Additionally, it allows for localisation of the segmented image, i.e. calculatio
 
 In version 2.0.0 of this tool, we also make available a model that has been trained on a set of 680 annotated CT scans obtained from multiple clinical sites. 
 
-The output of our lesion segmentation tool is a segmentation map in NIfTI format with integer values ranging from 1 to 4 representing:
-1. Intraparenchymal haemorrhage (IPH);
-2. Extra-axial haemorrhage (EAH);
-3. Perilesional oedema;
-4. Intraventricular haemorrhage (IVH).
+The output of our lesion segmentation tool is a segmentation map in NIfTI format with integer values ranging from 1 to 5 representing:
+1. Intraventricular haemorrhage (IVH-Red);
+2. Epi- or sub-dural haemorrhage (ESDH-green);
+3. Perilesional edema (blue);
+4. Intraparenchymal haemorrhage (IPH-yellow)
+5. Subarachnoid (SAH-cyan)
 
 A CSV file with the total volume of lesion calculated for each lesion class is also part of the output. If the user chooses to perform localisation of lesions, 
 this file will also include the volume of lesion per brain region, the volume of each brain region as well as the total brain volume.

@@ -122,7 +122,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         description="Apply blast-ct lesion segmentation to a head CT (single file or directory).",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
-            "Output labels: 1=IPH, 2=EAH, 3=Perilesional oedema, 4=IVH\n"
+            "Output labels: 1=IPH, 2=EAH, 3=Perilesional edema, 4=IVH, 5=SAH\n"
             "\nExamples:\n"
             "  %(prog)s -i scan.nii.gz\n"
             "  %(prog)s -i scan.nii.gz -o prediction.nii.gz --device 0 --ensemble\n"

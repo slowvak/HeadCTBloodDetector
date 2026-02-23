@@ -10,7 +10,7 @@ from blast_ct.nifti.datasets import FullImageToOverlappingPatchesNiftiDataset
 from blast_ct.nifti.patch_samplers import get_patch_and_padding
 from blast_ct.nifti.rescale import create_reference_reoriented_image
 
-CLASS_NAMES = ['background', 'iph', 'eah', 'oedema', 'ivh']
+CLASS_NAMES = ['background', 'iph', 'eah', 'edema', 'ivh', 'sah']
 
 
 def add_predicted_volumes_to_dataframe(dataframe, id_, array, resolution):

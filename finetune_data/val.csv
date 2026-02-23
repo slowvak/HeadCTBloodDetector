@@ -1,0 +1,3 @@
+id,image,target,sampling_mask
+CQ500-CT-3,/Users/bje/Desktop/CTHead/CQ500-CT-3_stripped.nii.gz,/Users/bje/Desktop/CTHead/CQ500-CT-3_prediction.nii.gz,/Users/bje/repos/HeadCTBloodDetector/finetune_data/CQ500-CT-3_stripped_brain_mask.nii.gz
+CQ500-CT-4,/Users/bje/Desktop/CTHead/CQ500-CT-4_stripped.nii.gz,/Users/bje/Desktop/CTHead/CQ500-CT-4_prediction.nii.gz,/Users/bje/repos/HeadCTBloodDetector/finetune_data/CQ500-CT-4_stripped_brain_mask.nii.gz
