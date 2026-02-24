@@ -1,7 +1,8 @@
 id,image,target,sampling_mask
-CQ500-CT-7,/Users/bje/Desktop/CTHead/CQ500-CT-7_stripped.nii.gz,/Users/bje/Desktop/CTHead/CQ500-CT-7_prediction.nii.gz,/Users/bje/repos/HeadCTBloodDetector/finetune_data/CQ500-CT-7_stripped_brain_mask.nii.gz
-CQ500-CT-9,/Users/bje/Desktop/CTHead/CQ500-CT-9_stripped.nii.gz,/Users/bje/Desktop/CTHead/CQ500-CT-9_prediction.nii.gz,/Users/bje/repos/HeadCTBloodDetector/finetune_data/CQ500-CT-9_stripped_brain_mask.nii.gz
-CQ500-CT-2,/Users/bje/Desktop/CTHead/CQ500-CT-2_stripped.nii.gz,/Users/bje/Desktop/CTHead/CQ500-CT-2_prediction.nii.gz,/Users/bje/repos/HeadCTBloodDetector/finetune_data/CQ500-CT-2_stripped_brain_mask.nii.gz
-CQ500-CT-5,/Users/bje/Desktop/CTHead/CQ500-CT-5_stripped.nii.gz,/Users/bje/Desktop/CTHead/CQ500-CT-5_prediction.nii.gz,/Users/bje/repos/HeadCTBloodDetector/finetune_data/CQ500-CT-5_stripped_brain_mask.nii.gz
-CQ500-CT-0,/Users/bje/Desktop/CTHead/CQ500-CT-0_stripped.nii.gz,/Users/bje/Desktop/CTHead/CQ500-CT-0_prediction.nii.gz,/Users/bje/repos/HeadCTBloodDetector/finetune_data/CQ500-CT-0_stripped_brain_mask.nii.gz
-CQ500-CT-1,/Users/bje/Desktop/CTHead/CQ500-CT-1_stripped.nii.gz,/Users/bje/Desktop/CTHead/CQ500-CT-1_prediction.nii.gz,/Users/bje/repos/HeadCTBloodDetector/finetune_data/CQ500-CT-1_stripped_brain_mask.nii.gz
+CQ500-CT-7,/Users/bje01/Desktop/CTHead/CQ500-CT-7_stripped.nii.gz,/Users/bje01/Desktop/CTHead/CQ500-CT-7_prediction.nii.gz,/Users/bje01/repos/HeadCTBloodDetector/finetune_data/CQ500-CT-7_stripped_brain_mask.nii.gz
+CQ500-CT-3,/Users/bje01/Desktop/CTHead/CQ500-CT-3_stripped.nii.gz,/Users/bje01/Desktop/CTHead/CQ500-CT-3_prediction.nii.gz,/Users/bje01/repos/HeadCTBloodDetector/finetune_data/CQ500-CT-3_stripped_brain_mask.nii.gz
+CQ500-CT-9,/Users/bje01/Desktop/CTHead/CQ500-CT-9_stripped.nii.gz,/Users/bje01/Desktop/CTHead/CQ500-CT-9_prediction.nii.gz,/Users/bje01/repos/HeadCTBloodDetector/finetune_data/CQ500-CT-9_stripped_brain_mask.nii.gz
+CQ500-CT-13,/Users/bje01/Desktop/CTHead/CQ500-CT-13_stripped.nii.gz,/Users/bje01/Desktop/CTHead/CQ500-CT-13_prediction.nii.gz,/Users/bje01/repos/HeadCTBloodDetector/finetune_data/CQ500-CT-13_stripped_brain_mask.nii.gz
+CQ500-CT-4,/Users/bje01/Desktop/CTHead/CQ500-CT-4_stripped.nii.gz,/Users/bje01/Desktop/CTHead/CQ500-CT-4_prediction.nii.gz,/Users/bje01/repos/HeadCTBloodDetector/finetune_data/CQ500-CT-4_stripped_brain_mask.nii.gz
+CQ500-CT-0,/Users/bje01/Desktop/CTHead/CQ500-CT-0_stripped.nii.gz,/Users/bje01/Desktop/CTHead/CQ500-CT-0_prediction.nii.gz,/Users/bje01/repos/HeadCTBloodDetector/finetune_data/CQ500-CT-0_stripped_brain_mask.nii.gz
+CQ500-CT-1,/Users/bje01/Desktop/CTHead/CQ500-CT-1_stripped.nii.gz,/Users/bje01/Desktop/CTHead/CQ500-CT-1_prediction.nii.gz,/Users/bje01/repos/HeadCTBloodDetector/finetune_data/CQ500-CT-1_stripped_brain_mask.nii.gz

@@ -4,7 +4,7 @@ import torch
 
 
 def to_np_cpu(tensor):
-    return tensor.to('cpu').detach().numpy()
+    return tensor.to('cpu').detach().numpy().copy()
 
 
 def report_scalar(name, scalar):

@@ -1,9 +1,9 @@
-Cases found   : 8
-Training set  : 6 case(s)
+Cases found   : 9
+Training set  : 7 case(s)
 Validation set: 2 case(s)
 
-Train IDs : ['CQ500-CT-7', 'CQ500-CT-9', 'CQ500-CT-2', 'CQ500-CT-5', 'CQ500-CT-0', 'CQ500-CT-1']
-Val IDs   : ['CQ500-CT-3', 'CQ500-CT-4']
+Train IDs : ['CQ500-CT-7', 'CQ500-CT-3', 'CQ500-CT-9', 'CQ500-CT-13', 'CQ500-CT-4', 'CQ500-CT-0', 'CQ500-CT-1']
+Val IDs   : ['CQ500-CT-2', 'CQ500-CT-5']
 
-Train CSV : /Users/bje/repos/HeadCTBloodDetector/finetune_data/train.csv
-Val CSV   : /Users/bje/repos/HeadCTBloodDetector/finetune_data/val.csv
+Train CSV : /Users/bje01/repos/HeadCTBloodDetector/finetune_data/train.csv
+Val CSV   : /Users/bje01/repos/HeadCTBloodDetector/finetune_data/val.csv
