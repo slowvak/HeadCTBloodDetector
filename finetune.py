@@ -174,7 +174,15 @@ def finetune(
 
     # Optimiser + scheduler
     lr_scheduler = get_optimizer(config, model)
-    criterion    = get_loss(config)
+
+    # Loss: penalise missed SAH voxels 2x more than any other error
+    from blast_ct.trainer.losses import CrossEntropyLoss as _CELoss
+    class_names = config['data']['class_names']
+    num_classes  = config['data']['num_classes']
+    sah_weight = torch.ones(num_classes)
+    sah_weight[class_names.index('SAH')] = 2.0
+    criterion = _CELoss(weight=sah_weight)
+    print(f"Loss weights: { {n: f'{w:.1f}' for n, w in zip(class_names, sah_weight.tolist())} }")
     hooks        = get_training_hooks(str(job_dir), config, device, valid_loader, test_loader)
 
     # Train
