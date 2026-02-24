@@ -169,7 +169,7 @@ def finetune(
 
     # Data loaders
     train_loader = get_train_loader(config, model, str(train_csv), use_cuda=False)
-    valid_loader = get_valid_loader(config, model, str(val_csv),   use_cuda=False)
+    valid_loader = get_test_loader(config, model, str(val_csv),    use_cuda=False)
     test_loader  = get_test_loader( config, model, str(val_csv),   use_cuda=False)
 
     # Optimiser + scheduler
