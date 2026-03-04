@@ -4,7 +4,7 @@
 Expected file naming inside CTHead/:
   CT-X.nii.gz                  — original CT
   CT-X_stripped.nii.gz         — skull-stripped CT  (used as model input)
-  CT-X_prediction.nii.gz      — single-label segmentation (0=bg,1=IPH,2=EAH,3=edema,4=IVH,5=SAH)
+  CT-X_predictions.nii.gz      — single-label segmentation (0=bg,1=IPH,2=EAH,3=edema,4=IVH,5=SAH)
 
 The skull-stripped image doubles as the sampling mask: its non-zero voxels
 define the brain region where blast-ct draws training patches.
@@ -65,7 +65,7 @@ def discover_cases(data_dir: Path, mask_dir: Path) -> list[dict]:
     for orig in originals:
         stem = orig.name[: -len(".nii.gz")]          # e.g. "CT-3"
         stripped = data_dir / f"{stem}_stripped.nii.gz"
-        prediction = data_dir / f"{stem}_prediction.nii.gz"
+        prediction = data_dir / f"{stem}_predictions.nii.gz"
 
         if not stripped.exists():
             missing.append(f"  MISSING stripped : {stripped.name}")
@@ -115,8 +115,8 @@ def split_cases(cases: list[dict], val_fraction: float, seed: int) -> tuple[list
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data-dir", type=Path,
-                        default=Path.home() / "Desktop" / "CTHead",
-                        help="Directory containing CT-X / CT-X_stripped / CT-X_prediction files.")
+                        default=Path.home() / "Desktop" / "HandCurated",
+                        help="Directory containing CT-X / CT-X_stripped / CT-X_predictions files.")
     parser.add_argument("--out-dir", type=Path,
                         default=Path(__file__).parent / "finetune_data",
                         help="Where to write train.csv, val.csv, summary.txt.")
@@ -138,7 +138,7 @@ def main():
     cases = discover_cases(args.data_dir, mask_dir)
     if not cases:
         print("❌  No complete cases found. Check that each CT-X.nii.gz has a matching "
-              "CT-X_stripped.nii.gz and CT-X_prediction.nii.gz in the same directory.")
+              "CT-X_stripped.nii.gz and CT-X_predictions.nii.gz in the same directory.")
         return
 
     train, val = split_cases(cases, args.val_fraction, args.seed)

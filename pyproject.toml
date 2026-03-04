@@ -9,6 +9,9 @@ dependencies = [
     "scipy",
     "mlx",
     "blast-ct",
+    "pydicom>=2.4.4",
+    "openpyxl>=3.1.5",
+    "dicom2nifti>=2.6.0",
 ]
 
 [tool.uv.sources]

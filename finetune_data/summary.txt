@@ -1,9 +1,9 @@
-Cases found   : 9
-Training set  : 7 case(s)
-Validation set: 2 case(s)
+Cases found   : 44
+Training set  : 33 case(s)
+Validation set: 11 case(s)
 
-Train IDs : ['CQ500-CT-7', 'CQ500-CT-3', 'CQ500-CT-9', 'CQ500-CT-13', 'CQ500-CT-4', 'CQ500-CT-0', 'CQ500-CT-1']
-Val IDs   : ['CQ500-CT-2', 'CQ500-CT-5']
+Train IDs : ['CQ500-CT-20', 'CQ500-CT-4', 'CQ500-CT-31', 'CQ500-CT-22', 'CQ500-CT-35', 'CQ500-CT-49', 'CQ500-CT-5', 'CQ500-CT-38', 'CQ500-CT-23', 'CQ500-CT-34', 'CQ500-CT-3', 'CQ500-CT-32', 'CQ500-CT-39', 'CQ500-CT-9', 'CQ500-CT-0', 'CQ500-CT-29', 'CQ500-CT-26', 'CQ500-CT-7', 'CQ500-CT-48', 'CQ500-CT-42', 'CQ500-CT-52', 'CQ500-CT-11', 'CQ500-CT-37', 'CQ500-CT-14', 'CQ500-CT-45', 'CQ500-CT-15', 'CQ500-CT-18', 'CQ500-CT-24', 'CQ500-CT-25', 'CQ500-CT-27', 'CQ500-CT-1', 'CQ500-CT-17', 'CQ500-CT-51']
+Val IDs   : ['CQ500-CT-19', 'CQ500-CT-12', 'CQ500-CT-2', 'CQ500-CT-44', 'CQ500-CT-50', 'CQ500-CT-28', 'CQ500-CT-40', 'CQ500-CT-36', 'CQ500-CT-13', 'CQ500-CT-47', 'CQ500-CT-33']
 
 Train CSV : /Users/bje01/repos/HeadCTBloodDetector/finetune_data/train.csv
 Val CSV   : /Users/bje01/repos/HeadCTBloodDetector/finetune_data/val.csv

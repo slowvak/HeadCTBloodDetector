@@ -32,7 +32,11 @@ import random
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
+import SimpleITK as sitk
 import torch
+import torch.nn as nn
+import torch.nn.functional as F
 
 # Patch SegmentationMetrics to show num_correct / num_total instead of
 # NaN-prone precision/recall/f1.  The original metric_fns dict captures
@@ -59,6 +63,67 @@ def _patched_report(self):
 
 _metrics.SegmentationMetrics.report = _patched_report
 
+
+class FocalDiceLoss(nn.Module):
+    """Focal loss + soft Dice loss, combined as a weighted per-class average.
+
+    For each true class c present in the batch:
+      - Focal loss: mean of -(1-p_t)^gamma * log(p_t) over voxels whose true
+        label is c, where p_t is the softmax probability of the correct class.
+        The (1-p_t)^gamma term down-weights easy (already well-predicted)
+        voxels so training focuses on hard examples.
+      - Dice loss: 1 - 2*|P∩Y| / (|P|+|Y|) using soft (probability) maps,
+        computed over the whole volume for class c.
+
+    The two per-class losses are summed and divided by the same class-weight
+    denominator, so the total loss is:
+
+        L = (focal_total + dice_total) / denom
+
+    SAH contributes twice as much as every other class (sah_weight=2.0).
+    With 6 classes the effective denominator is 7 (5×1 + 1×2).
+    """
+
+    def __init__(self, class_names: list, sah_weight: float = 2.0,
+                 gamma: float = 2.0, smooth: float = 1.0):
+        super().__init__()
+        n = len(class_names)
+        w = torch.ones(n)
+        w[class_names.index('SAH')] = sah_weight
+        self.register_buffer('class_weights', w)
+        self.n_classes = n
+        self.gamma = gamma
+        self.smooth = smooth
+
+    def forward(self, logits: torch.Tensor, target: torch.Tensor, **kwargs) -> torch.Tensor:
+        probs = F.softmax(logits, dim=1)   # (B, C, ...)
+        focal_total = logits.new_zeros(1)
+        dice_total  = logits.new_zeros(1)
+        denom       = logits.new_zeros(1)
+
+        for c in range(self.n_classes):
+            mask = target == c
+            if not mask.any():
+                continue
+            w_c = self.class_weights[c]
+            denom = denom + w_c
+
+            # Focal: mean over voxels whose true class is c
+            p_t     = probs[:, c][mask]
+            focal_c = ((1.0 - p_t) ** self.gamma * (-torch.log(p_t.clamp(min=1e-8)))).mean()
+            focal_total = focal_total + w_c * focal_c
+
+            # Soft Dice: over whole volume for class c
+            p_c          = probs[:, c]
+            y_c          = mask.float()
+            intersection = (p_c * y_c).sum()
+            dice_c       = 1.0 - (2.0 * intersection + self.smooth) / (
+                               p_c.sum() + y_c.sum() + self.smooth)
+            dice_total = dice_total + w_c * dice_c
+
+        denom = denom.clamp(min=1e-8)
+        return (focal_total + dice_total) / denom
+
 from blast_ct.read_config import (
     get_model, get_optimizer, get_loss,
     get_train_loader, get_valid_loader, get_test_loader, get_training_hooks,
@@ -71,12 +136,55 @@ from blast_ct.trainer.model_trainer import ModelTrainer
 # ---------------------------------------------------------------------------
 
 REPO_ROOT = Path(__file__).parent
+DEFAULT_DATA_DIR     = Path.home() / "Desktop" / "CTHead"
 DEFAULT_TRAIN_CSV    = REPO_ROOT / "finetune_data" / "train.csv"
 DEFAULT_VAL_CSV      = REPO_ROOT / "finetune_data" / "val.csv"
 DEFAULT_CONFIG       = REPO_ROOT / "finetune_config.json"
 DEFAULT_JOB_DIR      = REPO_ROOT / "finetune_runs" / "run_001"
 DEFAULT_PRETRAINED   = (REPO_ROOT / "blast-ct" / "blast_ct" / "data"
                         / "saved_models" / "model_1.torch_model")
+
+MEDIAN_RADIUS = 2   # 2D 5×5 per axial slice (radius 2 = ±2 voxels = 5 total)
+
+
+# ---------------------------------------------------------------------------
+# Pre-processing: median filter
+# ---------------------------------------------------------------------------
+
+def _filter_nifti(src: Path, dst: Path) -> None:
+    """Write a 5×5-per-axial-slice median-filtered copy of src to dst."""
+    img = sitk.ReadImage(str(src))
+    mf  = sitk.MedianImageFilter()
+    mf.SetRadius([MEDIAN_RADIUS, MEDIAN_RADIUS, 0])   # x, y filtered; z unchanged
+    sitk.WriteImage(mf.Execute(img), str(dst))
+
+
+def build_filtered_csv(csv_path: Path, filtered_dir: Path,
+                       columns: list[str]) -> Path:
+    """Return path to a CSV identical to csv_path except that every file in
+    *columns* has been replaced with a 5×5 median-filtered copy cached in
+    filtered_dir.  Existing cached files are reused without re-filtering.
+    """
+    filtered_dir.mkdir(parents=True, exist_ok=True)
+    df = pd.read_csv(csv_path)
+
+    for col in columns:
+        if col not in df.columns:
+            continue
+        new_paths = []
+        for path_str in df[col]:
+            src = Path(path_str)
+            dst = filtered_dir / (src.name.replace(".nii.gz", "_filtered.nii.gz")
+                                  .replace(".nii",    "_filtered.nii"))
+            if not dst.exists():
+                print(f"  Filtering {col}: {src.name} → {dst.name}")
+                _filter_nifti(src, dst)
+            new_paths.append(str(dst))
+        df[col] = new_paths
+
+    out_csv = filtered_dir / csv_path.name
+    df.to_csv(out_csv, index=False)
+    return out_csv
 
 
 # ---------------------------------------------------------------------------
@@ -167,22 +275,23 @@ def finetune(
     else:
         print("⚠️  No pretrained weights loaded — training from scratch.")
 
+    # Pre-process: apply 5×5 median filter to images and labels
+    filtered_dir = job_dir / "filtered_data"
+    print(f"\nPre-filtering training data (5×5 median, cached in {filtered_dir})…")
+    filtered_train_csv = build_filtered_csv(train_csv, filtered_dir, ["image", "target"])
+    filtered_val_csv   = build_filtered_csv(val_csv,   filtered_dir, ["image", "target"])
+
     # Data loaders
-    train_loader = get_train_loader(config, model, str(train_csv), use_cuda=False)
-    valid_loader = get_test_loader(config, model, str(val_csv),    use_cuda=False)
-    test_loader  = get_test_loader( config, model, str(val_csv),   use_cuda=False)
+    train_loader = get_train_loader(config, model, str(filtered_train_csv), use_cuda=False)
+    valid_loader = get_test_loader(config, model, str(filtered_val_csv),    use_cuda=False)
+    test_loader  = get_test_loader( config, model, str(filtered_val_csv),   use_cuda=False)
 
     # Optimiser + scheduler
     lr_scheduler = get_optimizer(config, model)
 
-    # Loss: penalise missed SAH voxels 2x more than any other error
-    from blast_ct.trainer.losses import CrossEntropyLoss as _CELoss
-    class_names = config['data']['class_names']
-    num_classes  = config['data']['num_classes']
-    sah_weight = torch.ones(num_classes)
-    sah_weight[class_names.index('SAH')] = 2.0
-    criterion = _CELoss(weight=sah_weight)
-    print(f"Loss weights: { {n: f'{w:.1f}' for n, w in zip(class_names, sah_weight.tolist())} }")
+    # Loss: focal + soft Dice, per-class balanced, SAH weighted 2x
+    criterion = FocalDiceLoss(config['data']['class_names'])
+    print("Loss: focal (γ=2) + soft Dice  (SAH weight = 2.0)")
     hooks        = get_training_hooks(str(job_dir), config, device, valid_loader, test_loader)
 
     # Train
@@ -200,6 +309,10 @@ def finetune(
 
 def parse_args():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--data-dir",         type=Path, default=DEFAULT_DATA_DIR,
+                   help="Directory containing CT-X / CT-X_stripped / CT-X_prediction files. "
+                        "Used to auto-generate train/val CSVs when they do not already exist. "
+                        f"Default: {DEFAULT_DATA_DIR}")
     p.add_argument("--train-csv",        type=Path, default=DEFAULT_TRAIN_CSV)
     p.add_argument("--val-csv",          type=Path, default=DEFAULT_VAL_CSV)
     p.add_argument("--config-file",      type=Path, default=DEFAULT_CONFIG)
@@ -209,21 +322,29 @@ def parse_args():
     p.add_argument("--pretrained-model", type=Path, default=DEFAULT_PRETRAINED,
                    help="Path to a .torch_model pretrained checkpoint to start from.")
     p.add_argument("--random-seed",      type=int,  default=42)
+    p.add_argument("--val-fraction",     type=float, default=0.25)
     return p.parse_args()
 
 
 def main():
     args = parse_args()
 
-    # Sanity checks
-    if not args.train_csv.exists():
-        print(f"❌ train CSV not found: {args.train_csv}")
-        print("   Run:  python prepare_finetune_data.py   first.")
-        return
-    if not args.val_csv.exists():
-        print(f"❌ val CSV not found: {args.val_csv}")
-        print("   Run:  python prepare_finetune_data.py   first.")
-        return
+    # Auto-generate train/val CSVs from --data-dir if they don't exist yet
+    if not (args.train_csv.exists() and args.val_csv.exists()):
+        from prepare_finetune_data import discover_cases, split_cases
+        if not args.data_dir.exists():
+            raise SystemExit(f"Data directory not found: {args.data_dir}\n"
+                             "Pass --data-dir or pre-generate CSVs with prepare_finetune_data.py.")
+        print(f"Discovering cases in {args.data_dir} …")
+        csv_dir  = args.train_csv.parent
+        csv_dir.mkdir(parents=True, exist_ok=True)
+        cases    = discover_cases(args.data_dir, csv_dir)
+        if not cases:
+            raise SystemExit("No complete cases found (need CT-X, CT-X_stripped, CT-X_prediction).")
+        train, val = split_cases(cases, args.val_fraction, args.random_seed)
+        pd.DataFrame(train).to_csv(args.train_csv, index=False)
+        pd.DataFrame(val).to_csv(args.val_csv,     index=False)
+        print(f"  {len(train)} train / {len(val)} val cases → {csv_dir}/")
 
     finetune(
         train_csv=args.train_csv,

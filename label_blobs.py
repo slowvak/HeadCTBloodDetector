@@ -31,6 +31,8 @@ from scipy.ndimage import median_filter, label, sum as ndsum, center_of_mass, bi
 # 26-connected structuring element (3×3×3 cube of ones)
 STRUCT_26 = np.ones((3, 3, 3), dtype=np.int32)
 
+MIN_COMPONENT_VOXELS = 5  # remove connected components smaller than this
+
 # Tissue HU Thresholds (Global)
 MIN_WATER = -10
 MAX_WATER = 14
@@ -48,6 +50,34 @@ def volume_per_voxel_cc(affine: np.ndarray) -> float:
     voxel_sizes = np.abs(np.diag(affine[:3, :3]))  # mm per voxel
     voxel_vol_mm3 = float(np.prod(voxel_sizes))
     return voxel_vol_mm3 / 1000.0  # 1 cc = 1000 mm³
+
+
+def filter_small_components(
+    data: np.ndarray,
+    min_voxels: int = MIN_COMPONENT_VOXELS,
+) -> np.ndarray:
+    """Remove per-class connected components smaller than *min_voxels*.
+
+    For every unique non-zero value (class label) in *data*, 26-connected
+    component analysis is run.  Components with fewer than *min_voxels*
+    voxels are zeroed out.  The remaining voxels keep their original value.
+
+    Returns a new array (the input is not modified).
+    """
+    out = data.copy()
+    for c in np.unique(data):
+        if c == 0:
+            continue
+        class_mask = (data == c).astype(np.int32)
+        labelled, n = label(class_mask, structure=STRUCT_26)
+        if n == 0:
+            continue
+        component_ids = np.arange(1, n + 1)
+        sizes = ndsum(class_mask, labelled, component_ids).astype(int)
+        for comp_id, sz in zip(component_ids, sizes):
+            if sz < min_voxels:
+                out[labelled == comp_id] = 0
+    return out
 
 
 def process(
@@ -364,6 +394,15 @@ def process_single_file(
     nib.save(out_img, str(output_path))
     print(f"\n✓ Blood label map saved to {output_path}")
 
+    # Save filtered blood label map (small components removed, values intact)
+    filtered_blood = filter_small_components(ranked_blood, min_voxels=MIN_COMPONENT_VOXELS)
+    filtered_name = output_path.name.replace("_blobs", "_filtered")
+    filtered_path = output_path.parent / filtered_name
+    filt_img = nib.Nifti1Image(filtered_blood, affine, img.header)
+    filt_img.header.set_data_dtype(np.int32)
+    nib.save(filt_img, str(filtered_path))
+    print(f"✓ Filtered blood map saved to {filtered_path}")
+
     # Save Water mask
     water_path = output_path.parent / f"{output_path.stem.replace('_blobs', '')}_water.nii.gz"
     if water_path.name.endswith(".gz.nii.gz"):  # fix double ext specific case
@@ -433,7 +472,7 @@ def collect_nifti_files(directory: Path) -> list[Path]:
     """Return sorted .nii/.nii.gz files that end with _stripped, in numerical order."""
     files = [
         p for p in directory.iterdir()
-        if (p.name.endswith("_stripped.nii") or p.name.endswith("_stripped.nii.gz"))
+        if (p.name.endswith(".nii") or p.name.endswith(".nii.gz"))
     ]
     files.sort(key=lambda p: natural_sort_key(p.name))
     return files
