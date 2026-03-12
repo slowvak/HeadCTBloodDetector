@@ -65,7 +65,10 @@ def discover_cases(data_dir: Path, mask_dir: Path) -> list[dict]:
     for orig in originals:
         stem = orig.name[: -len(".nii.gz")]          # e.g. "CT-3"
         stripped = data_dir / f"{stem}_stripped.nii.gz"
-        prediction = data_dir / f"{stem}_predictions.nii.gz"
+        # Look for prediction in data_dir first, then mask_dir
+        prediction = data_dir / f"{stem}_prediction.nii.gz"
+        if not prediction.exists():
+            prediction = mask_dir / f"{stem}_prediction.nii.gz"
 
         if not stripped.exists():
             missing.append(f"  MISSING stripped : {stripped.name}")
