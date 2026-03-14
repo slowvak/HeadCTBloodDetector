@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(env)",
+      "Read(//Users/bje/.config/uv/**)",
+      "Read(//Users/bje/.pip/**)",
+      "Bash(security find-certificate:*)",
+      "Bash(security:*)",
+      "Bash(UV_NATIVE_TLS=1 uv pip:*)",
+      "Bash(echo:*)",
+      "Bash(uv:*)",
+      "Bash(uv run:*)",
+      "Bash(python:*)"
+    ]
+  }
+}

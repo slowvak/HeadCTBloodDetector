@@ -47,21 +47,59 @@ import numpy as _np
 
 
 def _patched_report(self):
-    """Print num_correct / num_total per class from the confusion matrix."""
-    cm = self.value  # (num_classes, num_classes) numpy array
-    total_all = _np.sum(cm)
-    correct_all = _np.sum(_np.diag(cm))
-    message = f"{'OVERALL'.ljust(20)}:  correct/total = {int(correct_all)} / {int(total_all)}" \
-              f"  ({100.0 * correct_all / max(total_all, 1):.2f}%)\n"
-    for i, class_name in enumerate(self.class_names):
-        total_i = _np.sum(cm[i, :])   # all voxels whose true label is i
-        correct_i = cm[i, i]           # correctly predicted as i
-        message += f"{class_name.upper().ljust(20)}:  correct/total = {int(correct_i)} / {int(total_i)}" \
-                   f"  ({100.0 * correct_i / max(total_i, 1):.2f}%)\n"
-    return message
+    """Suppress broken blast-ct metrics (our OwnMetricsHook handles reporting)."""
+    return ''
 
 
 _metrics.SegmentationMetrics.report = _patched_report
+
+
+import time as _time
+from blast_ct.trainer.hooks import Hook
+
+
+class OwnMetricsHook(Hook):
+    """Our own confusion-matrix tracker — bypasses the broken blast-ct one."""
+
+    def __init__(self, class_names, num_classes=6):
+        super().__init__()
+        self.class_names = list(class_names)
+        self.class_names[0] = 'Foreground'
+        self.n = num_classes
+        self.cm = None
+        self.epoch_time = 0
+
+    def before_epoch(self):
+        self.cm = torch.zeros(self.n, self.n, dtype=torch.int64)
+        self.epoch_time = _time.time()
+
+    def after_batch(self):
+        state = self.model_trainer.current_state
+        t = state.get('target')
+        p = state.get('pred')
+        if t is None or p is None:
+            return
+        t_flat = t.flatten().long()
+        p_flat = p.flatten().long()
+        # Encode (true, pred) pairs as single index, then bincount
+        indices = t_flat * self.n + p_flat
+        counts = torch.bincount(indices, minlength=self.n * self.n)
+        self.cm += counts.reshape(self.n, self.n)
+
+    def after_epoch(self):
+        epoch = self.model_trainer.current_state['epoch']
+        num_epochs = self.model_trainer.current_state['num_epochs']
+        elapsed = _time.time() - self.epoch_time
+        cm = self.cm.numpy()
+        total_all = int(_np.sum(cm))
+        correct_all = int(_np.sum(_np.diag(cm)))
+        msg = f"Training epoch {epoch}/{num_epochs-1} ({elapsed:.0f}s)  "
+        msg += f"OVERALL: {correct_all}/{total_all} ({100.*correct_all/max(total_all,1):.1f}%)\n"
+        for i, name in enumerate(self.class_names):
+            total_i = int(_np.sum(cm[i, :]))
+            correct_i = int(cm[i, i])
+            msg += f"  {name.upper().ljust(16)}: {correct_i}/{total_i} ({100.*correct_i/max(total_i,1):.1f}%)\n"
+        print(msg)
 
 
 class FocalDiceLoss(nn.Module):
@@ -177,8 +215,10 @@ def build_filtered_csv(csv_path: Path, filtered_dir: Path,
         new_paths = []
         for path_str in df[col]:
             src = Path(path_str)
-            dst = filtered_dir / (src.name.replace(".nii.gz", "_filtered.nii.gz")
-                                  .replace(".nii",    "_filtered.nii"))
+            if src.name.endswith(".nii.gz"):
+                dst = filtered_dir / (src.name[:-len(".nii.gz")] + "_filtered.nii.gz")
+            else:
+                dst = filtered_dir / (src.name[:-len(".nii")] + "_filtered.nii")
             if not dst.exists():
                 print(f"  Filtering {col}: {src.name} → {dst.name}")
                 _filter_nifti(src, dst)
@@ -278,12 +318,12 @@ def finetune(
     else:
         print("⚠️  No pretrained weights loaded — training from scratch.")
 
-    # Pre-process: apply 5×5 median filter to images and labels
+    # Pre-process: apply 5×5 median filter to images only (not targets — they're discrete labels)
     # (label remapping 3→0, 5→3 is done in-place by prepare_finetune_data.py)
     filtered_dir = job_dir / "filtered_data"
     print(f"\nPre-filtering training data (5×5 median, cached in {filtered_dir})…")
-    filtered_train_csv = build_filtered_csv(train_csv, filtered_dir, ["image", "target"])
-    filtered_val_csv   = build_filtered_csv(val_csv,   filtered_dir, ["image", "target"])
+    filtered_train_csv = build_filtered_csv(train_csv, filtered_dir, ["image"])
+    filtered_val_csv   = build_filtered_csv(val_csv,   filtered_dir, ["image"])
 
     # Data loaders
     train_loader = get_train_loader(config, model, str(filtered_train_csv), use_cuda=False)
@@ -297,6 +337,7 @@ def finetune(
     criterion = FocalDiceLoss(config['data']['class_names'])
     print("Loss: focal (γ=2) + soft Dice  (SAH weight = 2.0, class 0 weight = 0.5)")
     hooks        = get_training_hooks(str(job_dir), config, device, valid_loader, test_loader)
+    hooks.append(OwnMetricsHook(config['data']['class_names'], config['data']['num_classes']))
 
     # Train
     print(f"\nStarting finetuning for {num_epochs} epochs → {job_dir}")

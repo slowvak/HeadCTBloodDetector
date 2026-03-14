@@ -44,7 +44,7 @@ from blast_ct.trainer.inference import ModelInference
 
 REPO_ROOT = Path(__file__).parent
 
-DEFAULT_INPUT_DIR = Path("/Volumes/OWC Express 1M2/CQ500_NII")
+DEFAULT_INPUT_DIR = Path("/Users/bje/Desktop/CQ500_NII")
 DEFAULT_OUTPUT_DIR = DEFAULT_INPUT_DIR / "finetuned"
 DEFAULT_MODEL_PATH = REPO_ROOT / "finetune_runs" / "run_001" / "saved_models" / "model_last.torch_model"
 DEFAULT_CONFIG     = REPO_ROOT / "finetune_config.json"
@@ -230,7 +230,7 @@ def run_inference(
                 for _, row in pred_index.iterrows():
                     src      = Path(str(row["prediction"]))
                     basename = src.name.replace("_prediction.nii.gz", "")
-                    dest     = output_dir / f"{basename}_predictions.nii.gz"
+                    dest     = output_dir / f"{basename}_segmentation.nii.gz"
 
                     # Load prediction array and clean before saving
                     pred_img  = sitk.ReadImage(str(src))
