@@ -81,7 +81,8 @@ class FocalDiceLoss(nn.Module):
         L = (focal_total + dice_total) / denom
 
     SAH contributes twice as much as every other class (sah_weight=2.0).
-    With 6 classes the effective denominator is 7 (5×1 + 1×2).
+    Class 0 (background) is included at half weight (0.5).
+    With 5 classes the effective denominator is 6.5 (0.5 + 3×1 + 1×2).
     """
 
     def __init__(self, class_names: list, sah_weight: float = 2.0,
@@ -97,15 +98,17 @@ class FocalDiceLoss(nn.Module):
 
     def forward(self, logits: torch.Tensor, target: torch.Tensor, **kwargs) -> torch.Tensor:
         probs = F.softmax(logits, dim=1)   # (B, C, ...)
-        focal_total = logits.new_zeros(1)
-        dice_total  = logits.new_zeros(1)
+        # Initialise from probs so the grad_fn is always present even when
+        # every voxel in the batch is class 0 (which is excluded from the loss).
+        focal_total = probs.sum() * 0.0
+        dice_total  = probs.sum() * 0.0
         denom       = logits.new_zeros(1)
 
         for c in range(self.n_classes):
             mask = target == c
             if not mask.any():
                 continue
-            w_c = self.class_weights[c]
+            w_c = self.class_weights[c] * (0.5 if c == 0 else 1.0)
             denom = denom + w_c
 
             # Focal: mean over voxels whose true class is c
@@ -276,6 +279,7 @@ def finetune(
         print("⚠️  No pretrained weights loaded — training from scratch.")
 
     # Pre-process: apply 5×5 median filter to images and labels
+    # (label remapping 3→0, 5→3 is done in-place by prepare_finetune_data.py)
     filtered_dir = job_dir / "filtered_data"
     print(f"\nPre-filtering training data (5×5 median, cached in {filtered_dir})…")
     filtered_train_csv = build_filtered_csv(train_csv, filtered_dir, ["image", "target"])
@@ -291,7 +295,7 @@ def finetune(
 
     # Loss: focal + soft Dice, per-class balanced, SAH weighted 2x
     criterion = FocalDiceLoss(config['data']['class_names'])
-    print("Loss: focal (γ=2) + soft Dice  (SAH weight = 2.0)")
+    print("Loss: focal (γ=2) + soft Dice  (SAH weight = 2.0, class 0 weight = 0.5)")
     hooks        = get_training_hooks(str(job_dir), config, device, valid_loader, test_loader)
 
     # Train

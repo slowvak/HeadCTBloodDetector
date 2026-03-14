@@ -39,14 +39,14 @@ while idx < len(sys.argv):
     if arg in flags:
         idx += 1
         path = os.path.realpath(os.path.abspath(sys.argv[idx]))
-        args.append(path)
+        args.append('"%s"' % path)
         paths.append(path)
     idx += 1
 args = ' '.join(args)
 
 # Get the unique mount points
 mounts = list(set([os.path.dirname(p) for p in paths]))
-mounts = ' '.join(['-v %s:%s' % (p, p) for p in mounts])
+mounts = ' '.join(['-v "%s":"%s"' % (p, p) for p in mounts])
 
 # Set UID and GID to avoid output files owned by root
 user = '-u %s:%s' % (os.getuid(), os.getgid())

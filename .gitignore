@@ -1,1 +1,6 @@
 finetune_runs/
+.DS_Store
+finetune_data/summary.txt
+finetune_data/train.csv
+finetune_data/val.csv
+*.nii.gz

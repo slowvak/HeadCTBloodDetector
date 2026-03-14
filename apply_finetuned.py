@@ -27,10 +27,12 @@ import shutil
 import tempfile
 from pathlib import Path
 
+import nibabel as nib
 import numpy as np
 import pandas as pd
 import SimpleITK as sitk
 import torch
+from scipy import ndimage
 
 from blast_ct.read_config import get_model, get_test_loader
 from blast_ct.nifti.savers import NiftiPatchSaver
@@ -119,27 +121,59 @@ BATCH_SIZE = 10  # files per inference batch (keeps memory bounded)
 # Post-processing
 # ---------------------------------------------------------------------------
 
-def remove_small_components(pred_path: Path,
-                            min_voxels: int = MIN_COMPONENT_VOXELS) -> None:
-    """In-place: delete per-class connected components smaller than min_voxels voxels."""
-    img = sitk.ReadImage(str(pred_path))
-    arr = np.round(sitk.GetArrayFromImage(img)).astype(np.int32)
-    out = arr.copy()
+def clean_prediction(seg: np.ndarray,
+                     image: nib.Nifti1Image,
+                     min_value: float = 40.0,
+                     max_value: float = 300.0,
+                     min_size: int = 5) -> np.ndarray:
+    """Return a cleaned copy of *seg* by applying HU thresholding then
+    removing small 3-D connected components.
 
-    for c in np.unique(arr):
+    Parameters
+    ----------
+    seg        : integer label array (shape Z×Y×X).
+    image      : nibabel image of the source CT (HU values), same voxel grid.
+    min_value  : HU lower bound; predictions below this are zeroed (default 40).
+    max_value  : HU upper bound; predictions above this are zeroed (default 300).
+    min_size   : connected components with fewer voxels than this are removed
+                 (default 5).
+
+    Logic
+    -----
+    ndimage.label(out == c) — for each foreground class c:
+
+    1. out == c creates a boolean 3D binary mask — True where the label equals c, False everywhere else.
+    2. ndimage.label(...) scans that binary mask and assigns a unique integer ID to each group of connected True voxels. Two voxels are considered
+    connected if they share a face (6-connectivity by default). The result labeled is an array the same shape as seg where each distinct
+    connected blob has its own integer (1, 2, 3, …), and background is 0.
+    3. np.unique(labeled[labeled > 0], return_counts=True) counts how many voxels belong to each blob.
+    4. Any blob whose voxel count is below min_size has all its voxels set to 0 in out — effectively erasing it.
+
+    This runs separately per class, so a small IPH blob and a small SAH blob are each evaluated independently against min_size.
+
+
+    Returns
+    -------
+    Cleaned copy of seg as an int32 ndarray.
+    """
+    ct = np.asarray(image.dataobj, dtype=np.float32)
+    out = seg.copy().astype(np.int32)
+
+    # Step 1: zero out predictions where CT HU is outside the valid range
+    bad_hu = (ct < min_value) | (ct > max_value)
+    out[bad_hu & (out != 0)] = 0
+
+    # Step 2: per-class 3-D connected component analysis; drop small blobs
+    for c in np.unique(out):
         if c == 0:
             continue
-        mask_img = sitk.GetImageFromArray((arr == c).astype(np.uint8))
-        mask_img.CopyInformation(img)
-        cc_arr = sitk.GetArrayFromImage(sitk.ConnectedComponent(mask_img))
-        labels, counts = np.unique(cc_arr[cc_arr > 0], return_counts=True)
+        labeled, _ = ndimage.label(out == c)
+        labels, counts = np.unique(labeled[labeled > 0], return_counts=True)
         for lbl, cnt in zip(labels, counts):
-            if cnt < min_voxels:
-                out[cc_arr == lbl] = 0
+            if cnt < min_size:
+                out[labeled == lbl] = 0
 
-    cleaned = sitk.GetImageFromArray(out.astype(arr.dtype))
-    cleaned.CopyInformation(img)
-    sitk.WriteImage(cleaned, str(pred_path))
+    return out
 
 
 def run_inference(
@@ -166,11 +200,13 @@ def run_inference(
             os.makedirs(cast_dir, exist_ok=True)
 
             entries: list[tuple[Path, Path]] = []
+            orig_by_basename: dict[str, Path] = {}
             for orig in batch:
                 prepared = prepare_image(orig, cast_dir)
                 if prepared is None:
                     continue
                 entries.append((orig, prepared))
+                orig_by_basename[get_basename(orig)] = orig
 
             if not entries:
                 continue
@@ -195,8 +231,20 @@ def run_inference(
                     src      = Path(str(row["prediction"]))
                     basename = src.name.replace("_prediction.nii.gz", "")
                     dest     = output_dir / f"{basename}_predictions.nii.gz"
-                    shutil.copy2(src, dest)
-                    remove_small_components(dest)
+
+                    # Load prediction array and clean before saving
+                    pred_img  = sitk.ReadImage(str(src))
+                    seg_arr   = np.round(sitk.GetArrayFromImage(pred_img)).astype(np.int32)
+                    orig_path = orig_by_basename.get(basename)
+                    if orig_path is not None:
+                        ct_nib  = nib.load(str(orig_path))
+                        seg_arr = clean_prediction(seg_arr, ct_nib)
+                    else:
+                        print(f"    WARNING: original CT not found for {basename}, skipping clean_prediction")
+
+                    cleaned_img = sitk.GetImageFromArray(seg_arr)
+                    cleaned_img.CopyInformation(pred_img)
+                    sitk.WriteImage(cleaned_img, str(dest))
                     results[basename] = dest
                     print(f"    {dest.name}")
 

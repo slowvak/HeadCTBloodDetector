@@ -29,6 +29,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 
@@ -111,11 +112,22 @@ def run_synthstrip(
     -------
     subprocess.CompletedProcess
     """
+    # Docker cannot mount paths that contain spaces, even when quoted.
+    # If any path has a space, copy input to /tmp, run there, move outputs back.
+    _tmpdir = None
+    run_input, run_output, run_mask = input_path, output_path, mask_path
+    if any(' ' in str(p) for p in (input_path, output_path, mask_path)):
+        _tmpdir = Path(tempfile.mkdtemp())
+        run_input  = _tmpdir / input_path.name
+        run_output = _tmpdir / output_path.name
+        run_mask   = _tmpdir / mask_path.name
+        shutil.copy2(str(input_path), str(run_input))
+
     cmd = [
         synthstrip_cmd,
-        "-i", str(input_path),
-        "-o", str(output_path),
-        "-m", str(mask_path),
+        "-i", str(run_input),
+        "-o", str(run_output),
+        "-m", str(run_mask),
     ]
 
     if gpu:
@@ -129,10 +141,18 @@ def run_synthstrip(
     print(f"  Input  : {input_path}")
     print(f"  Output : {output_path}")
     print(f"  Mask   : {mask_path}")
+    if _tmpdir:
+        print(f"  (via tmp: {_tmpdir})")
     print(f"  Command: {' '.join(cmd)}")
     print(f"{'─' * 60}")
 
     result = subprocess.run(cmd, check=False)
+
+    if _tmpdir:
+        if result.returncode == 0:
+            shutil.move(str(run_output), str(output_path))
+            shutil.move(str(run_mask),   str(mask_path))
+        shutil.rmtree(_tmpdir, ignore_errors=True)
 
     if result.returncode != 0:
         print(
@@ -235,6 +255,9 @@ def main(argv: list[str] | None = None) -> int:
         output_path, mask_path = build_output_paths(
             input_path, args.output, args.mask
         )
+        if output_path.exists():
+            print(f"Skipping (already exists): {output_path}")
+            return 0
         result = run_synthstrip(
             input_path=input_path,
             output_path=output_path,
@@ -265,6 +288,11 @@ def main(argv: list[str] | None = None) -> int:
         print(f"{'═' * 60}")
 
         out_path, msk_path = build_output_paths(nii_path, None, None)
+
+        if out_path.exists():
+            print(f"  Skipping (already exists): {out_path.name}")
+            succeeded += 1
+            continue
 
         result = run_synthstrip(
             input_path=nii_path,

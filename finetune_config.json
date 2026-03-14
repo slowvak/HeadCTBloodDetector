@@ -6,7 +6,7 @@
     }
   },
   "data": {
-    "class_names": ["background", "IPH", "EAH", "edema", "IVH", "SAH"],
+    "class_names": ["background", "IPH", "EAH", "SAH", "IVH"],
     "task": "segmentation",
     "channels": ["image"],
     "target": "target",
@@ -19,7 +19,7 @@
       }
     },
     "input_channels": 1,
-    "num_classes": 6
+    "num_classes": 5
   },
   "training": {
     "batch_size": 4,
@@ -28,7 +28,7 @@
     "input_patch_size": [110, 110, 110],
     "sampler": {
       "ConditionalPatchSampler": {
-        "class_probabilities": [0.1, 0.18, 0.18, 0.18, 0.18, 0.18],
+        "class_probabilities": [0.1, 0.225, 0.225, 0.225, 0.225],
         "n_tries": 50
       }
     },
