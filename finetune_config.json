@@ -6,7 +6,7 @@
     }
   },
   "data": {
-    "class_names": ["background", "IPH", "EAH", "SAH", "IVH"],
+    "class_names": ["background", "IPH", "EDH", "SAH", "IVH"],
     "task": "segmentation",
     "channels": ["image"],
     "target": "target",

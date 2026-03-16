@@ -64,38 +64,34 @@ def rename_cq500_files(data_dir: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Prediction pre-processing
+# Filename cleanup
 # ---------------------------------------------------------------------------
 
-def preprocess_predictions(data_dir: Path) -> None:
-    """For every *_prediction.nii.gz write a corresponding *_seg.nii.gz with:
-      1. Class 3 removed (set to 0).
-      2. Class 5 remapped to 3 (SAH).
-    Skips files whose *_seg.nii.gz already exists.
+def clean_filenames(data_dir: Path) -> None:
+    """Clean up filenames in data_dir:
+      1. Remove ' copy' from any .nii.gz filename.
+         If the destination already exists, delete it before renaming.
+      2. Rename *_stripped_segmentation.nii.gz → *_prediction.nii.gz.
     """
-    pred_files = sorted(data_dir.glob("*_prediction.nii.gz"))
-    if not pred_files:
-        print("  No *_prediction.nii.gz files found in", data_dir)
-        return
-
-    for pred_path in pred_files:
-        seg_path = pred_path.parent / pred_path.name.replace("_prediction.nii.gz", "_seg.nii.gz")
-        if seg_path.exists():
+    # Step 1: remove ' copy'
+    for path in sorted(data_dir.glob("*.nii.gz")):
+        if " copy" not in path.name:
             continue
+        new_name = path.name.replace(" copy", "")
+        new_path = path.parent / new_name
+        if new_path.exists():
+            new_path.unlink()
+        path.rename(new_path)
+        print(f"  Renamed: {path.name}  →  {new_name}")
 
-        pred_img = sitk.ReadImage(str(pred_path))
-        arr = sitk.GetArrayViewFromImage(pred_img)
-        if (arr == 5).any():
-            print(f"  Class 5 (SAH) found: {pred_path.name}")
-
-        out_arr = sitk.GetArrayFromImage(pred_img).astype(np.int16)
-        out_arr[out_arr == 5] = -1  # park SAH to avoid collision with class 3
-        out_arr[out_arr == 3] = 0   # remove edema
-        out_arr[out_arr == -1] = 3  # SAH → class 3
-        out_img = sitk.GetImageFromArray(out_arr)
-        out_img.CopyInformation(pred_img)
-        sitk.WriteImage(out_img, str(seg_path))
-        print(f"  Written: {seg_path.name}")
+    # Step 2: rename *_stripped_segmentation.nii.gz → *_prediction.nii.gz
+    for path in sorted(data_dir.glob("*_stripped_segmentation.nii.gz")):
+        new_name = path.name.replace("_stripped_segmentation.nii.gz", "_prediction.nii.gz")
+        new_path = path.parent / new_name
+        if new_path.exists():
+            new_path.unlink()
+        path.rename(new_path)
+        print(f"  Renamed: {path.name}  →  {new_name}")
 
 
 # ---------------------------------------------------------------------------
@@ -119,10 +115,11 @@ def make_brain_mask(stripped_path: Path, mask_dir: Path) -> Path:
     return mask_path
 
 
-def _find_original(stem: str, data_dir: Path,
-                   source_dir: Path | None) -> Path | None:
+def _find_original(stem: str, *search_dirs: Path | None) -> Path | None:
     """Return the original (non-stripped) CT for *stem*, or None."""
-    for d in ([data_dir] + ([source_dir] if source_dir else [])):
+    for d in search_dirs:
+        if d is None:
+            continue
         candidate = d / f"{stem}.nii.gz"
         if candidate.exists():
             return candidate
@@ -144,6 +141,7 @@ def _strip(original: Path, stripped_out: Path, mask_out: Path,
 
 def discover_cases(data_dir: Path, mask_dir: Path,
                    source_dir: Path | None = None,
+                   old_dir: Path | None = None,
                    synthstrip_cmd: str = "synthstrip-docker") -> list[dict]:
     """Return one dict per labeled case found in data_dir.
 
@@ -151,12 +149,13 @@ def discover_cases(data_dir: Path, mask_dir: Path,
     For each case, the stripped image is resolved as follows:
       1. data_dir/CQ500_NNN_stripped.nii.gz
       2. source_dir/CQ500_NNN_stripped.nii.gz
-      3. If neither exists but the original CT is found, run synthstrip to produce it.
+      3. old_dir/CQ500_NNN_stripped.nii.gz
+      4. If none exist but the original CT is found (any dir), run synthstrip.
     The brain mask is used from data_dir if present, otherwise generated.
     """
-    seg_files = sorted(data_dir.glob("CQ500_*_seg.nii.gz"))
-    if not seg_files:
-        seg_files = sorted(data_dir.glob("*_seg.nii.gz"))
+    pred_files = sorted(data_dir.glob("CQ500_*_prediction.nii.gz"))
+    if not pred_files:
+        pred_files = sorted(data_dir.glob("*_prediction.nii.gz"))
 
     # Only resolve synthstrip once, and only if we might need it
     _synthstrip_resolved: str | None = None
@@ -164,19 +163,22 @@ def discover_cases(data_dir: Path, mask_dir: Path,
     cases = []
     missing = []
 
-    for seg_path in seg_files:
-        stem = seg_path.name[: -len("_seg.nii.gz")]  # e.g. CQ500_053
+    for pred_path in pred_files:
+        stem = pred_path.name[: -len("_prediction.nii.gz")]  # e.g. CQ500_053
 
-        # Resolve stripped image
-        stripped = data_dir / f"{stem}_stripped.nii.gz"
-        if not stripped.exists() and source_dir:
-            candidate = source_dir / f"{stem}_stripped.nii.gz"
+        # Resolve stripped image — check all directories in order
+        stripped = None
+        for d in (data_dir, source_dir, old_dir):
+            if d is None:
+                continue
+            candidate = d / f"{stem}_stripped.nii.gz"
             if candidate.exists():
                 stripped = candidate
+                break
 
         # Auto-strip if original CT exists
-        if not stripped.exists():
-            original = _find_original(stem, data_dir, source_dir)
+        if stripped is None:
+            original = _find_original(stem, data_dir, source_dir, old_dir)
             if original:
                 stripped_out = original.parent / f"{stem}_stripped.nii.gz"
                 mask_out     = original.parent / f"{stem}_mask.nii.gz"
@@ -198,10 +200,20 @@ def discover_cases(data_dir: Path, mask_dir: Path,
         else:
             brain_mask = make_brain_mask(stripped, mask_dir)
 
+        # Prefer *_seg.nii.gz as target (already remapped) if available
+        target = pred_path
+        for d in (data_dir, source_dir, old_dir):
+            if d is None:
+                continue
+            seg_candidate = d / f"{stem}_seg.nii.gz"
+            if seg_candidate.exists():
+                target = seg_candidate
+                break
+
         cases.append({
             "id": stem,
             "image": str(stripped),
-            "target": str(seg_path),
+            "target": str(target),
             "sampling_mask": str(brain_mask),
         })
 
@@ -242,6 +254,9 @@ def main():
     parser.add_argument("--source-dir", type=Path,
                         default="/Volumes/OWC Express 1M2/CQ500_NII",
                         help="Fallback directory for stripped CT images (old CQ500-CT-N naming).")
+    parser.add_argument("--old-dir", type=Path,
+                        default="/Volumes/OWC Express 1M2/HandCurated_old",
+                        help="Secondary fallback directory for stripped/raw CTs (e.g. HandCurated_old).")
     parser.add_argument("--out-dir", type=Path,
                         default=Path(__file__).parent / "finetune_data",
                         help="Where to write train.csv, val.csv, summary.txt.")
@@ -262,6 +277,10 @@ def main():
     if args.source_dir and not source_dir:
         print(f"⚠️  --source-dir not found, ignored: {args.source_dir}")
 
+    old_dir = args.old_dir if args.old_dir and args.old_dir.exists() else None
+    if args.old_dir and not old_dir:
+        print(f"⚠️  --old-dir not found, ignored: {args.old_dir}")
+
     args.out_dir.mkdir(parents=True, exist_ok=True)
     mask_dir = args.mask_dir or args.out_dir
     mask_dir.mkdir(parents=True, exist_ok=True)
@@ -272,11 +291,11 @@ def main():
         print(f"\nRenaming CQ500-CT-N files in {source_dir} …")
         rename_cq500_files(source_dir)
 
-    print(f"\nPreprocessing prediction files in {args.data_dir} …")
-    preprocess_predictions(args.data_dir)
+    print(f"\nCleaning filenames in {args.data_dir} …")
+    clean_filenames(args.data_dir)
 
-    print(f"\nDiscovering cases (stripped fallback: {source_dir or 'none'}) …")
-    cases = discover_cases(args.data_dir, mask_dir, source_dir,
+    print(f"\nDiscovering cases (fallbacks: {source_dir or 'none'}, {old_dir or 'none'}) …")
+    cases = discover_cases(args.data_dir, mask_dir, source_dir, old_dir,
                            synthstrip_cmd=args.synthstrip_cmd)
     if not cases:
         print("❌  No complete cases found.")

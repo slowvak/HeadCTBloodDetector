@@ -10,7 +10,15 @@
       "Bash(echo:*)",
       "Bash(uv:*)",
       "Bash(uv run:*)",
-      "Bash(python:*)"
+      "Bash(python:*)",
+      "Bash(git checkout:*)",
+      "Bash(git add:*)",
+      "Bash(git push:*)",
+      "Bash(python3 -c \"import json; c=json.load\\(open\\('finetune_config.json'\\)\\); print\\(c['data']['class_names'], c['data']['num_classes']\\)\")",
+      "Bash(cat /Users/bje01/repos/HeadCTBloodDetector/finetune_config.json | python3 -c \"import json,sys; d=json.load\\(sys.stdin\\); print\\(json.dumps\\(d.get\\('optimizer', d.get\\('training', {}\\)\\), indent=2\\)\\)\")",
+      "Bash(python3 -c \"import json; d=json.load\\(open\\('/Users/bje01/repos/HeadCTBloodDetector/finetune_config.json'\\)\\); print\\(json.dumps\\(d.get\\('scheduler', 'NOT FOUND'\\), indent=2\\)\\)\")",
+      "Bash(gh api:*)",
+      "Bash(which uv:*)"
     ]
   }
 }

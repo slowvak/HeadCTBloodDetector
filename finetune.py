@@ -51,7 +51,30 @@ def _patched_report(self):
     return ''
 
 
+def _patched_increment(self, model_state):
+    """No-op: bypass blast-ct confusion matrix (crashes when labels contain unexpected classes)."""
+    pass
+
+
+def _patched_save_and_reset(self):
+    """Skip calc_* calls that divide by the all-zero confusion matrix and produce RuntimeWarnings."""
+    import torch as _torch
+    if isinstance(self.running_value, _torch.Tensor):
+        self.value = self.running_value.clone().cpu().numpy()
+        self.running_value[:] = 0
+    else:
+        self.value = self.running_value.copy()
+        self.running_value[:] = 0
+
+
+def _patched_log_to_tensorboard(self, epoch, writer, tag):
+    pass
+
+
 _metrics.SegmentationMetrics.report = _patched_report
+_metrics.SegmentationMetrics.increment = _patched_increment
+_metrics.SegmentationMetrics.save_and_reset = _patched_save_and_reset
+_metrics.SegmentationMetrics.log_to_tensorboard = _patched_log_to_tensorboard
 
 
 import time as _time
@@ -100,6 +123,49 @@ class OwnMetricsHook(Hook):
             correct_i = int(cm[i, i])
             msg += f"  {name.upper().ljust(16)}: {correct_i}/{total_i} ({100.*correct_i/max(total_i,1):.1f}%)\n"
         print(msg)
+
+
+class BestModelSaverHook(Hook):
+    """Saves model_best.torch_model whenever mean validation loss improves.
+
+    Runs a second (no-grad) forward pass over the validation set on every
+    eval epoch so it can track mean loss independently of the blast-ct hooks.
+    """
+
+    def __init__(self, valid_loader, eval_every: int = 10):
+        super().__init__()
+        self.valid_loader = valid_loader
+        self.eval_every   = eval_every
+        self.best_loss    = float("inf")
+
+    def after_epoch(self):
+        state      = self.model_trainer.current_state
+        epoch      = state["epoch"]
+        num_epochs = state["num_epochs"]
+        is_last    = epoch == num_epochs - 1
+
+        if not (epoch % self.eval_every == 0 or is_last) or epoch == 0:
+            return
+
+        total_loss, n = 0.0, 0
+        for batch_state in self.model_trainer.step(epoch, self.valid_loader, is_training=False):
+            total_loss += float(batch_state["loss"])
+            n += 1
+
+        if n == 0:
+            return
+
+        mean_loss = total_loss / n
+        if mean_loss < self.best_loss:
+            self.best_loss = mean_loss
+            import os as _os
+            saved_dir = _os.path.join(self.model_trainer.job_dir, "saved_models")
+            _os.makedirs(saved_dir, exist_ok=True)
+            best_path = _os.path.join(saved_dir, "model_best.torch_model")
+            torch.save(self.model_trainer.model.state_dict(), best_path)
+            print(f"  *** New best model (epoch {epoch}, val_loss={mean_loss:.4f}) → {best_path}")
+        else:
+            print(f"      Val loss {mean_loss:.4f}  (best={self.best_loss:.4f})")
 
 
 class FocalDiceLoss(nn.Module):
@@ -336,8 +402,10 @@ def finetune(
     # Loss: focal + soft Dice, per-class balanced, SAH weighted 2x
     criterion = FocalDiceLoss(config['data']['class_names'])
     print("Loss: focal (γ=2) + soft Dice  (SAH weight = 2.0, class 0 weight = 0.5)")
+    eval_every   = config["valid"]["eval_every"]
     hooks        = get_training_hooks(str(job_dir), config, device, valid_loader, test_loader)
     hooks.append(OwnMetricsHook(config['data']['class_names'], config['data']['num_classes']))
+    hooks.append(BestModelSaverHook(valid_loader, eval_every))
 
     # Train
     print(f"\nStarting finetuning for {num_epochs} epochs → {job_dir}")

@@ -44,9 +44,9 @@ from blast_ct.trainer.inference import ModelInference
 
 REPO_ROOT = Path(__file__).parent
 
-DEFAULT_INPUT_DIR = Path("/Users/bje/Desktop/CQ500_NII")
-DEFAULT_OUTPUT_DIR = DEFAULT_INPUT_DIR / "finetuned"
-DEFAULT_MODEL_PATH = REPO_ROOT / "finetune_runs" / "run_001" / "saved_models" / "model_last.torch_model"
+DEFAULT_INPUT_DIR = Path("/Volumes/OWC Express 1M2/CQ500_NII")
+DEFAULT_OUTPUT_DIR = Path("/Volumes/OWC Express 1M2/CQ500_NII/finetuned")
+DEFAULT_MODEL_PATH = REPO_ROOT / "finetune_runs" / "run_001" / "saved_models" / "model_best.torch_model"
 DEFAULT_CONFIG     = REPO_ROOT / "finetune_config.json"
 
 MIN_COMPONENT_VOXELS = 5   # connected components smaller than this many voxels are removed
@@ -156,7 +156,8 @@ def clean_prediction(seg: np.ndarray,
     -------
     Cleaned copy of seg as an int32 ndarray.
     """
-    ct = np.asarray(image.dataobj, dtype=np.float32)
+    # nibabel loads as (X, Y, Z); SimpleITK seg is (Z, Y, X) — transpose to match
+    ct = np.asarray(image.dataobj, dtype=np.float32).T
     out = seg.copy().astype(np.int32)
 
     # Step 1: zero out predictions where CT HU is outside the valid range
@@ -182,10 +183,15 @@ def run_inference(
     config: dict,
     model_path: Path,
     device: torch.device,
-) -> dict[str, Path]:
-    """Run model on all files in batches; return mapping {basename -> prediction_path}."""
+) -> dict[str, dict]:
+    """Run model on all files in batches.
+
+    Returns mapping {basename -> {"pred": Path, "entropy": float, "attrition": float}}
+      entropy    : mean per-voxel softmax entropy over all brain voxels (nats); higher = more uncertain
+      attrition  : fraction of raw foreground voxels removed by clean_prediction
+    """
     output_dir.mkdir(parents=True, exist_ok=True)
-    results: dict[str, Path] = {}
+    results: dict[str, dict] = {}
 
     print(f"\nRunning inference on {len(input_files)} file(s) in batches of {BATCH_SIZE}…")
     for batch_start in range(0, len(input_files), BATCH_SIZE):
@@ -219,7 +225,7 @@ def run_inference(
 
             model       = get_model(config)
             test_loader = get_test_loader(config, model, csv_path, use_cuda=(device.type != "cpu"))
-            saver       = NiftiPatchSaver(tmp, test_loader, write_prob_maps=False)
+            saver       = NiftiPatchSaver(tmp, test_loader, write_prob_maps=True)
 
             ModelInference(tmp, device, model, saver, str(model_path), "segmentation")(test_loader)
 
@@ -235,6 +241,8 @@ def run_inference(
                     # Load prediction array and clean before saving
                     pred_img  = sitk.ReadImage(str(src))
                     seg_arr   = np.round(sitk.GetArrayFromImage(pred_img)).astype(np.int32)
+                    raw_fg    = int((seg_arr != 0).sum())
+
                     orig_path = orig_by_basename.get(basename)
                     if orig_path is not None:
                         ct_nib  = nib.load(str(orig_path))
@@ -242,11 +250,22 @@ def run_inference(
                     else:
                         print(f"    WARNING: original CT not found for {basename}, skipping clean_prediction")
 
+                    cleaned_fg = int((seg_arr != 0).sum())
+                    attrition  = (raw_fg - cleaned_fg) / raw_fg if raw_fg > 0 else float("nan")
+
                     cleaned_img = sitk.GetImageFromArray(seg_arr)
                     cleaned_img.CopyInformation(pred_img)
                     sitk.WriteImage(cleaned_img, str(dest))
-                    results[basename] = dest
-                    print(f"    {dest.name}")
+
+                    # Compute mean entropy from probability maps
+                    prob_col  = row.get("prob_maps") if hasattr(row, "get") else None
+                    prob_path = Path(str(prob_col)) if prob_col and not pd.isna(prob_col) else \
+                                src.parent / src.name.replace("_prediction.nii.gz", "_prob_maps.nii.gz")
+                    entropy = compute_entropy(prob_path) if prob_path.exists() else float("nan")
+
+                    results[basename] = {"pred": dest, "entropy": entropy, "attrition": attrition}
+                    print(f"    {dest.name}  entropy={entropy:.4f}  attrition={attrition:.2%}"
+                          if not np.isnan(entropy) else f"    {dest.name}")
 
     return results
 
@@ -254,38 +273,54 @@ def run_inference(
 # Metrics
 # ---------------------------------------------------------------------------
 
-CLASS_NAMES = ["background", "IPH", "EAH", "edema", "IVH", "SAH"]
+def compute_entropy(prob_map_path: Path) -> float:
+    """Mean per-voxel softmax entropy (nats) over all brain voxels.
+
+    The probability map written by NiftiPatchSaver is a 4-D NIfTI with one
+    volume per class (shape Z×Y×X×C or C×Z×Y×X depending on blast-ct version).
+    Entropy H = -sum_c p_c * log(p_c), averaged over every voxel where the
+    model assigned any non-background probability (i.e. max_c p_c < 1.0 or
+    any foreground class has p > 0).
+
+    Higher entropy  →  model more uncertain  →  higher-value case to label.
+    """
+    img  = sitk.ReadImage(str(prob_map_path))
+    arr  = sitk.GetArrayFromImage(img).astype(np.float32)  # shape depends on blast-ct
+
+    # blast-ct writes prob maps as (C, Z, Y, X); move class axis to last
+    if arr.ndim == 4:
+        probs = arr.transpose(1, 2, 3, 0)   # (C, Z, Y, X) → (Z, Y, X, C)
+    else:
+        return float("nan")
+
+    probs = np.clip(probs, 1e-8, 1.0)
+    h     = -np.sum(probs * np.log(probs), axis=-1)  # (Z, Y, X)
+    return float(h.mean())
 
 
-def voxel_stats(arr: np.ndarray, num_classes: int) -> dict:
-    total = arr.size
-    return {
-        CLASS_NAMES[c]: {
-            "count": int((arr == c).sum()),
-            "pct":   100.0 * (arr == c).sum() / max(total, 1),
-        }
-        for c in range(num_classes)
-    }
+def voxel_counts(arr: np.ndarray, class_names: list[str]) -> dict[str, int]:
+    """Return voxel count per class (indexed by class name)."""
+    return {name: int((arr == c).sum()) for c, name in enumerate(class_names)}
 
 
-def compute_dice_metrics(pred_path: Path, ref_path: Path, num_classes: int) -> dict:
+def compute_dice(pred_path: Path, ref_path: Path,
+                 class_names: list[str]) -> dict[str, float]:
+    """Return Dice score per foreground class. Returns {} on shape mismatch."""
     pred = sitk.GetArrayFromImage(sitk.ReadImage(str(pred_path))).astype(int)
     ref  = sitk.GetArrayFromImage(sitk.ReadImage(str(ref_path))).astype(int)
     if pred.shape != ref.shape:
-        print(f"  WARNING: shape mismatch for {pred_path.name} vs {ref_path.name} — skipping metrics")
+        print(f"  WARNING: shape mismatch {pred_path.name} vs {ref_path.name} — skipping Dice")
         return {}
     out = {}
-    for c in range(1, num_classes):   # skip background
-        name = CLASS_NAMES[c]
-        p, r = pred == c, ref == c
-        tp        = float(np.logical_and(p, r).sum())
-        denom_d   = float(p.sum() + r.sum())
-        out[name] = {
-            "dice":      2.0 * tp / denom_d     if denom_d   > 0 else float("nan"),
-            "recall":    tp / float(r.sum())     if r.sum()   > 0 else float("nan"),
-            "precision": tp / float(p.sum())     if p.sum()   > 0 else float("nan"),
-        }
+    for c, name in enumerate(class_names):
+        if c == 0:
+            continue  # skip background
+        p, r  = pred == c, ref == c
+        tp    = float(np.logical_and(p, r).sum())
+        denom = float(p.sum() + r.sum())
+        out[name] = 2.0 * tp / denom if denom > 0 else float("nan")
     return out
+
 
 # ---------------------------------------------------------------------------
 # Reporting
@@ -295,43 +330,21 @@ def _fmt(v) -> str:
     return f"{v:.3f}" if not np.isnan(v) else "  n/a "
 
 
-def print_group_report(group_name: str, records: list[dict], num_classes: int) -> None:
-    print(f"\n{'='*72}")
-    print(f"  {group_name}  ({len(records)} file(s))")
-    print(f"{'='*72}")
-
-    if not records:
-        print("  (no files in this group)")
-        return
-
-    # Class distribution
-    print(f"\n  {'Class':<12}  {'Mean %':>8}  {'Std %':>8}  {'Mean voxels':>12}")
-    print(f"  {'-'*48}")
-    for c in range(num_classes):
-        name  = CLASS_NAMES[c]
-        pcts  = [r["stats"][name]["pct"]   for r in records]
-        cnts  = [r["stats"][name]["count"] for r in records]
-        print(f"  {name:<12}  {np.mean(pcts):8.3f}  {np.std(pcts):8.3f}  {np.mean(cnts):12.0f}")
-
-    # Dice / recall / precision (only if any reference was found)
-    met_records = [r for r in records if r["metrics"]]
-    if not met_records:
-        print("\n  (no reference segmentations found — Dice not computed)")
-        return
-
-    print(f"\n  Dice vs reference  ({len(met_records)}/{len(records)} files have a reference)")
-    print(f"\n  {'Class':<12}  {'Dice':>8}  {'Recall':>8}  {'Precision':>10}")
-    print(f"  {'-'*44}")
-    for c in range(1, num_classes):
-        name   = CLASS_NAMES[c]
-        dices  = [r["metrics"][name]["dice"]      for r in met_records if name in r["metrics"]]
-        recs   = [r["metrics"][name]["recall"]    for r in met_records if name in r["metrics"]]
-        precs  = [r["metrics"][name]["precision"] for r in met_records if name in r["metrics"]]
-        valid  = lambda lst: [x for x in lst if not np.isnan(x)]
-        d_str  = _fmt(np.mean(valid(dices)))  if valid(dices)  else "  n/a "
-        r_str  = _fmt(np.mean(valid(recs)))   if valid(recs)   else "  n/a "
-        p_str  = _fmt(np.mean(valid(precs)))  if valid(precs)  else "  n/a "
-        print(f"  {name:<12}  {d_str:>8}  {r_str:>8}  {p_str:>10}")
+def print_summary(records: list[dict], class_names: list[str]) -> None:
+    fg = class_names[1:]  # foreground classes
+    print(f"\n{'='*80}")
+    print(f"  {'File':<40}  " + "  ".join(f"{n:>8}" for n in fg)
+          + f"  {'entropy':>8}  {'attrtn':>7}")
+    print(f"  {'-'*78}")
+    for rec in sorted(records, key=lambda r: r["entropy"]
+                      if not np.isnan(r["entropy"]) else -1, reverse=True):
+        voxels  = "  ".join(f"{rec['voxels'].get(n, 0):>8}" for n in fg)
+        ent_str = f"{rec['entropy']:>8.4f}" if not np.isnan(rec["entropy"]) else "     n/a"
+        att_str = f"{rec['attrition']:>6.1%}" if not np.isnan(rec["attrition"]) else "   n/a"
+        print(f"  {rec['basename']:<40}  {voxels}  {ent_str}  {att_str}")
+        if rec["dice"]:
+            dice_str = "  ".join(f"{_fmt(rec['dice'].get(n, float('nan'))):>8}" for n in fg)
+            print(f"  {'  (Dice)':40}  {dice_str}")
 
 # ---------------------------------------------------------------------------
 # Main
@@ -340,7 +353,7 @@ def print_group_report(group_name: str, records: list[dict], num_classes: int) -
 def parse_args():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--input-dir",        type=Path, default=DEFAULT_INPUT_DIR)
-    p.add_argument("--output-dir",       type=Path, default=DEFAULT_OUTPUT_DIR)
+    p.add_argument("--output-dir",       type=Path, default=None)
     p.add_argument("--model-path",       type=Path, default=DEFAULT_MODEL_PATH)
     p.add_argument("--config-file",      type=Path, default=DEFAULT_CONFIG)
     p.add_argument(
@@ -361,6 +374,8 @@ def parse_args():
 
 def main():
     args = parse_args()
+    if args.output_dir is None:
+        args.output_dir = args.input_dir / "finetuned"
 
     for label, path in [("Input dir",  args.input_dir),
                          ("Model",      args.model_path),
@@ -370,8 +385,6 @@ def main():
 
     with open(args.config_file) as f:
         config = json.load(f)
-    num_classes = config["data"]["num_classes"]
-
     input_files = collect_inputs(args.input_dir)
     if not input_files:
         raise SystemExit(f"No eligible .nii/.nii.gz files found in {args.input_dir}")
@@ -381,7 +394,8 @@ def main():
     if args.skip_inference:
         print("\nSkipping inference (--skip-inference set).")
         predictions = {
-            get_basename(p): args.output_dir / f"{get_basename(p)}_predictions.nii.gz"
+            get_basename(p): {"pred": args.output_dir / f"{get_basename(p)}_segmentation.nii.gz",
+                              "entropy": float("nan"), "attrition": float("nan")}
             for p in input_files
         }
     else:
@@ -389,46 +403,52 @@ def main():
             input_files, args.output_dir, config, args.model_path, torch.device("cpu")
         )
 
+    class_names = config["data"]["class_names"]
+
     # --- Per-file stats ---
-    stripped_records: list[dict] = []
-    raw_records:      list[dict] = []
+    records: list[dict] = []
 
     for p in input_files:
-        basename  = get_basename(p)
-        pred_path = predictions.get(basename)
-        if pred_path is None or not pred_path.exists():
+        basename = get_basename(p)
+        result   = predictions.get(basename)
+        if result is None:
             print(f"  WARNING: no prediction found for {basename}, skipping.")
+            continue
+        pred_path = result["pred"]
+        if not pred_path.exists():
+            print(f"  WARNING: prediction file missing for {basename}, skipping.")
             continue
 
         pred_arr = sitk.GetArrayFromImage(sitk.ReadImage(str(pred_path))).astype(int)
-        stats    = voxel_stats(pred_arr, num_classes)
+        counts   = voxel_counts(pred_arr, class_names)
 
         ref_path = args.input_dir / (basename + args.reference_suffix)
-        metrics  = compute_dice_metrics(pred_path, ref_path, num_classes) if ref_path.exists() else {}
+        dice     = compute_dice(pred_path, ref_path, class_names) if ref_path.exists() else {}
 
-        record = {"basename": basename, "stats": stats, "metrics": metrics}
-        (stripped_records if "_stripped" in basename else raw_records).append(record)
+        records.append({
+            "basename":  basename,
+            "voxels":    counts,
+            "dice":      dice,
+            "entropy":   result["entropy"],
+            "attrition": result["attrition"],
+        })
 
-    print_group_report("SKULL-STRIPPED", stripped_records, num_classes)
-    print_group_report("RAW CT",         raw_records,      num_classes)
+    print_summary(records, class_names)
 
-    # --- Save CSV summary ---
+    # --- Save CSV summary (sorted by entropy descending = highest priority first) ---
     args.output_dir.mkdir(parents=True, exist_ok=True)
     rows = []
-    for rec in stripped_records + raw_records:
+    for rec in sorted(records, key=lambda r: r["entropy"]
+                      if not np.isnan(r["entropy"]) else -1, reverse=True):
         row = {
-            "file":  rec["basename"],
-            "group": "stripped" if "_stripped" in rec["basename"] else "raw",
+            "file":      rec["basename"],
+            "entropy":   round(rec["entropy"],   6),
+            "attrition": round(rec["attrition"], 4),
         }
-        for c in range(num_classes):
-            name = CLASS_NAMES[c]
-            row[f"{name}_pct"]    = round(rec["stats"][name]["pct"],   4)
-            row[f"{name}_voxels"] = rec["stats"][name]["count"]
-            if c > 0 and rec["metrics"]:
-                m = rec["metrics"].get(name, {})
-                row[f"{name}_dice"]      = m.get("dice",      float("nan"))
-                row[f"{name}_recall"]    = m.get("recall",    float("nan"))
-                row[f"{name}_precision"] = m.get("precision", float("nan"))
+        for c, name in enumerate(class_names):
+            row[f"{name}_voxels"] = rec["voxels"].get(name, 0)
+            if c > 0 and rec["dice"]:
+                row[f"{name}_dice"] = rec["dice"].get(name, float("nan"))
         rows.append(row)
 
     summary_path = args.output_dir / "performance_summary.csv"

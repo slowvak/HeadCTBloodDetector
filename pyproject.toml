@@ -12,6 +12,7 @@ dependencies = [
     "pydicom>=2.4.4",
     "openpyxl>=3.1.5",
     "dicom2nifti>=2.6.0",
+    "nnunetv2>=2.5.2",
 ]
 
 [tool.uv.sources]
