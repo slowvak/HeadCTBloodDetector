@@ -18,7 +18,8 @@
       "Bash(cat /Users/bje01/repos/HeadCTBloodDetector/finetune_config.json | python3 -c \"import json,sys; d=json.load\\(sys.stdin\\); print\\(json.dumps\\(d.get\\('optimizer', d.get\\('training', {}\\)\\), indent=2\\)\\)\")",
       "Bash(python3 -c \"import json; d=json.load\\(open\\('/Users/bje01/repos/HeadCTBloodDetector/finetune_config.json'\\)\\); print\\(json.dumps\\(d.get\\('scheduler', 'NOT FOUND'\\), indent=2\\)\\)\")",
       "Bash(gh api:*)",
-      "Bash(which uv:*)"
+      "Bash(which uv:*)",
+      "Bash(git rm:*)"
     ]
   }
 }

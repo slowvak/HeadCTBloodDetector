@@ -4,3 +4,9 @@ finetune_data/summary.txt
 finetune_data/train.csv
 finetune_data/val.csv
 *.nii.gz
+
+# nnUNet workspace (preprocessed data, checkpoints, large binaries)
+nnunet_workspace/
+
+# Auto-generated nnUNet custom trainer files
+nnUNetTrainer_*.py
