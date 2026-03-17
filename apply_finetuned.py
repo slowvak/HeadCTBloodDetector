@@ -31,11 +31,11 @@ import nibabel as nib
 import numpy as np
 import pandas as pd
 import SimpleITK as sitk
-import torch
+import torch as _torch
 from scipy import ndimage
-
+from run_synthstrip import ensure_synthstrip, run_synthstrip as _run_synthstrip, build_output_paths as _build_stripped_paths
 from blast_ct.read_config import get_model, get_test_loader
-from blast_ct.nifti.savers import NiftiPatchSaver
+from blast_ct.nifti.savers import NiftiPatchSaver, reconstruct_image
 from blast_ct.trainer.inference import ModelInference
 
 # ---------------------------------------------------------------------------
@@ -83,7 +83,20 @@ def prepare_image(src: Path, tmp_dir: str) -> Path | None:
     Always writes a processed copy to tmp_dir.
     Returns None (skip) if the image has an unexpected dimensionality (not 3D or 4D).
     """
-    img = sitk.ReadImage(str(src))
+    try:
+        img = sitk.ReadImage(str(src))
+    except RuntimeError as e:
+        if "orthonormal" not in str(e):
+            print(f"  SKIP {src.name}: {e}")
+            return None
+        # Non-orthonormal direction cosines — load via nibabel and rebuild a clean SimpleITK image
+        nib_img = nib.load(str(src))
+        arr = np.asarray(nib_img.dataobj, dtype=np.float32)
+        if arr.ndim == 4:
+            arr = arr[..., 0]  # take first volume
+        img = sitk.GetImageFromArray(arr.T)  # nibabel (X,Y,Z) → SimpleITK (Z,Y,X)
+        zooms = nib_img.header.get_zooms()[:3]
+        img.SetSpacing([float(z) for z in zooms])
 
     if img.GetDimension() == 4:
         # Go through numpy to get a clean 3D image free of 4D header metadata.
@@ -117,13 +130,52 @@ def prepare_image(src: Path, tmp_dir: str) -> Path | None:
 BATCH_SIZE = 10  # files per inference batch (keeps memory bounded)
 
 
+class _EntropySaver(NiftiPatchSaver):
+    """NiftiPatchSaver that computes per-image softmax entropy from in-memory reconstructions.
+
+    blast-ct's save_image() calls sitk.Resample(4D_prob_map, 3D_reference) which raises
+    a dimension-mismatch exception, so the prob_maps file is never actually written even
+    though its path appears in prediction.csv.  This subclass bypasses that by computing
+    entropy directly from the reconstruction array before save_image is called.
+    """
+
+    def __init__(self, job_dir, dataloader):
+        super().__init__(job_dir, dataloader, write_prob_maps=False)
+        self.entropies: dict[str, float] = {}
+        self._prob_patches: list = []
+
+    def append(self, state):
+        super().append(state)  # accumulates state['pred'] (write_prob_maps=False)
+        self._prob_patches += list(state['prob'].cpu().detach())
+
+    def __call__(self, state):
+        # Capture image metadata BEFORE super() increments image_index
+        target_shape, center_points = self.dataset.image_mapping[self.image_index]
+        patches_in_image = len(center_points)
+        image_id = str(self.dataset.data_index.iloc[self.image_index].name)
+
+        result = super().__call__(state)  # handles prediction saving + image_index advance
+
+        if len(self._prob_patches) >= patches_in_image:
+            target_patch_shape = self.dataset.patch_sampler.target_patch_size
+            patches = list(_torch.stack(self._prob_patches[:patches_in_image]).numpy())
+            self._prob_patches = self._prob_patches[patches_in_image:]
+            recon = reconstruct_image(patches, target_shape, center_points, target_patch_shape)
+            # recon shape after reconstruct_image's transpose: (Z, Y, X, C)
+            probs = np.clip(recon.astype(np.float32), 1e-8, 1.0)
+            h = -np.sum(probs * np.log(probs), axis=-1)  # (Z, Y, X)
+            self.entropies[image_id] = float(h.mean())
+
+        return result
+
+
 # ---------------------------------------------------------------------------
 # Post-processing
 # ---------------------------------------------------------------------------
 
 def clean_prediction(seg: np.ndarray,
                      image: nib.Nifti1Image,
-                     min_value: float = 40.0,
+                     min_value: float = 30.0,
                      max_value: float = 300.0,
                      min_size: int = 5) -> np.ndarray:
     """Return a cleaned copy of *seg* by applying HU thresholding then
@@ -182,7 +234,7 @@ def run_inference(
     output_dir: Path,
     config: dict,
     model_path: Path,
-    device: torch.device,
+    device: _torch.device,
 ) -> dict[str, dict]:
     """Run model on all files in batches.
 
@@ -225,7 +277,7 @@ def run_inference(
 
             model       = get_model(config)
             test_loader = get_test_loader(config, model, csv_path, use_cuda=(device.type != "cpu"))
-            saver       = NiftiPatchSaver(tmp, test_loader, write_prob_maps=True)
+            saver       = _EntropySaver(tmp, test_loader)
 
             ModelInference(tmp, device, model, saver, str(model_path), "segmentation")(test_loader)
 
@@ -257,11 +309,7 @@ def run_inference(
                     cleaned_img.CopyInformation(pred_img)
                     sitk.WriteImage(cleaned_img, str(dest))
 
-                    # Compute mean entropy from probability maps
-                    prob_col  = row.get("prob_maps") if hasattr(row, "get") else None
-                    prob_path = Path(str(prob_col)) if prob_col and not pd.isna(prob_col) else \
-                                src.parent / src.name.replace("_prediction.nii.gz", "_prob_maps.nii.gz")
-                    entropy = compute_entropy(prob_path) if prob_path.exists() else float("nan")
+                    entropy = saver.entropies.get(basename, float("nan"))
 
                     results[basename] = {"pred": dest, "entropy": entropy, "attrition": attrition}
                     print(f"    {dest.name}  entropy={entropy:.4f}  attrition={attrition:.2%}"
@@ -272,30 +320,6 @@ def run_inference(
 # ---------------------------------------------------------------------------
 # Metrics
 # ---------------------------------------------------------------------------
-
-def compute_entropy(prob_map_path: Path) -> float:
-    """Mean per-voxel softmax entropy (nats) over all brain voxels.
-
-    The probability map written by NiftiPatchSaver is a 4-D NIfTI with one
-    volume per class (shape Z×Y×X×C or C×Z×Y×X depending on blast-ct version).
-    Entropy H = -sum_c p_c * log(p_c), averaged over every voxel where the
-    model assigned any non-background probability (i.e. max_c p_c < 1.0 or
-    any foreground class has p > 0).
-
-    Higher entropy  →  model more uncertain  →  higher-value case to label.
-    """
-    img  = sitk.ReadImage(str(prob_map_path))
-    arr  = sitk.GetArrayFromImage(img).astype(np.float32)  # shape depends on blast-ct
-
-    # blast-ct writes prob maps as (C, Z, Y, X); move class axis to last
-    if arr.ndim == 4:
-        probs = arr.transpose(1, 2, 3, 0)   # (C, Z, Y, X) → (Z, Y, X, C)
-    else:
-        return float("nan")
-
-    probs = np.clip(probs, 1e-8, 1.0)
-    h     = -np.sum(probs * np.log(probs), axis=-1)  # (Z, Y, X)
-    return float(h.mean())
 
 
 def voxel_counts(arr: np.ndarray, class_names: list[str]) -> dict[str, int]:
@@ -400,7 +424,7 @@ def main():
         }
     else:
         predictions = run_inference(
-            input_files, args.output_dir, config, args.model_path, torch.device("cpu")
+            input_files, args.output_dir, config, args.model_path, _torch.device("cpu")
         )
 
     class_names = config["data"]["class_names"]
@@ -456,5 +480,178 @@ def main():
     print(f"\nSummary CSV saved to: {summary_path}")
 
 
+def _ensure_stripped(orig: Path, synthstrip_cmd: str) -> Path | None:
+    """Return the skull-stripped version of *orig*, running synthstrip if needed.
+
+    The stripped file is written alongside the original as <stem>_stripped.nii.gz.
+    Returns None if synthstrip fails.
+    """
+    stripped, mask = _build_stripped_paths(orig, None, None)
+    if stripped.exists():
+        return stripped
+    print(f"  Stripping: {orig.name}")
+    result = _run_synthstrip(
+        input_path=orig,
+        output_path=stripped,
+        mask_path=mask,
+        synthstrip_cmd=synthstrip_cmd,
+    )
+    return stripped if result.returncode == 0 else None
+
+
+def new_predictions(
+    input_dir: Path | str,
+    output_dir: Path | str,
+    model_dir: Path | str,
+    config_file: Path | str = DEFAULT_CONFIG,
+    synthstrip_cmd: str = "synthstrip-docker",
+) -> None:
+    """Apply the finetuned model to every CT .nii.gz in input_dir.
+
+    For each file that lacks a *_stripped.nii.gz counterpart, synthstrip is
+    run first.  Inference is always performed on the stripped image.
+    Predictions are written to output_dir as <stem>_prediction.nii.gz.
+    Files that already have a prediction in output_dir are skipped.
+
+    Parameters
+    ----------
+    input_dir       : directory containing input CT scans (.nii / .nii.gz)
+    output_dir      : where to write *_prediction.nii.gz files
+    model_dir       : directory containing the model file; prefers
+                      model_best.torch_model, then model_last.torch_model
+    config_file     : path to finetune_config.json (default: repo default)
+    synthstrip_cmd  : name / path of the synthstrip-docker executable
+    """
+    input_dir  = Path(input_dir)
+    output_dir = Path(output_dir)
+    model_dir  = Path(model_dir)
+
+    # Resolve model file
+    for candidate in ["model_best.torch_model", "model_last.torch_model"]:
+        if (model_dir / candidate).exists():
+            model_path = model_dir / candidate
+            break
+    else:
+        found = sorted(model_dir.glob("*.torch_model"))
+        if not found:
+            raise FileNotFoundError(f"No *.torch_model file found in {model_dir}")
+        model_path = found[-1]
+    print(f"Model: {model_path}")
+
+    synthstrip_cmd = ensure_synthstrip(synthstrip_cmd)
+
+    with open(config_file) as f:
+        config = json.load(f)
+
+    # Collect original CTs — exclude already-derived files
+    _EXCLUDE_TAGS = ("_stripped", "_mask", "_prediction", "_seg", "_segmentation",
+                     "_brain_mask", "_prob_maps")
+    raw_files = sorted(
+        p for p in input_dir.iterdir()
+        if (p.name.endswith(".nii") or p.name.endswith(".nii.gz"))
+        and not any(tag in p.name for tag in _EXCLUDE_TAGS)
+    )
+
+    # Skip originals that already have a prediction
+    pending = [
+        p for p in raw_files
+        if not (output_dir / f"{get_basename(p)}_prediction.nii.gz").exists()
+    ]
+    skipped = len(raw_files) - len(pending)
+    if skipped:
+        print(f"Skipping {skipped} file(s) with existing prediction.")
+    if not pending:
+        print("All predictions already exist — nothing to do.")
+        return
+
+    # --- Skull-strip pass ---------------------------------------------------
+    print(f"\nEnsuring skull-stripped versions for {len(pending)} file(s)…")
+    # Maps original path → stripped path (only entries where strip succeeded)
+    stripped_for: dict[Path, Path] = {}
+    for orig in pending:
+        stripped = _ensure_stripped(orig, synthstrip_cmd)
+        if stripped is None:
+            print(f"  WARNING: synthstrip failed for {orig.name}, skipping.")
+        else:
+            stripped_for[orig] = stripped
+
+    if not stripped_for:
+        print("No files could be stripped — nothing to run inference on.")
+        return
+
+    # Build the inference input list (stripped files), keyed back to originals
+    # for HU-based post-processing
+    input_files  = list(stripped_for.values())   # stripped paths (for model)
+    orig_by_stripped: dict[str, Path] = {
+        get_basename(s): o for o, s in stripped_for.items()
+    }
+
+    print(f"\nRunning inference on {len(input_files)} file(s)…")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    device = _torch.device("cpu")
+
+    for batch_start in range(0, len(input_files), BATCH_SIZE):
+        batch = input_files[batch_start : batch_start + BATCH_SIZE]
+        batch_num = batch_start // BATCH_SIZE + 1
+        total_batches = (len(input_files) + BATCH_SIZE - 1) // BATCH_SIZE
+        print(f"\n  Batch {batch_num}/{total_batches}  ({len(batch)} files)")
+
+        with tempfile.TemporaryDirectory(prefix="blast_newpred_") as tmp:
+            cast_dir = os.path.join(tmp, "cast")
+            os.makedirs(cast_dir, exist_ok=True)
+
+            entries: list[tuple[Path, Path]] = []
+            for stripped in batch:
+                prepared = prepare_image(stripped, cast_dir)
+                if prepared is None:
+                    continue
+                entries.append((stripped, prepared))
+
+            if not entries:
+                continue
+
+            csv_path = os.path.join(tmp, "test.csv")
+            pd.DataFrame(
+                [{"id": get_basename(s), "image": str(prepared)}
+                 for s, prepared in entries]
+            ).to_csv(csv_path, index=False)
+
+            model       = get_model(config)
+            test_loader = get_test_loader(config, model, csv_path, use_cuda=False)
+            saver       = _EntropySaver(tmp, test_loader)
+
+            ModelInference(tmp, device, model, saver, str(model_path), "segmentation")(test_loader)
+
+            pred_csv = os.path.join(tmp, "predictions", "prediction.csv")
+            if not os.path.exists(pred_csv):
+                print("  WARNING: no prediction.csv produced for this batch")
+                continue
+
+            pred_index = pd.read_csv(pred_csv)
+            for _, row in pred_index.iterrows():
+                src      = Path(str(row["prediction"]))
+                basename = src.name.replace("_prediction.nii.gz", "")
+                dest     = output_dir / f"{basename}_prediction.nii.gz"
+
+                pred_img = sitk.ReadImage(str(src))
+                seg_arr  = np.round(sitk.GetArrayFromImage(pred_img)).astype(np.int32)
+
+                # Post-process against the original (non-stripped) CT for HU filtering
+                orig_path = orig_by_stripped.get(basename)
+                if orig_path is not None:
+                    ct_nib  = nib.load(str(orig_path))
+                    seg_arr = clean_prediction(seg_arr, ct_nib)
+
+                out_img = sitk.GetImageFromArray(seg_arr)
+                out_img.CopyInformation(pred_img)
+                sitk.WriteImage(out_img, str(dest))
+                print(f"    → {dest.name}")
+
+    print(f"\nDone. Predictions written to: {output_dir}")
+
+
 if __name__ == "__main__":
-    main()
+    _input_dir  = Path.home() / "Desktop" / "CQ500_NII"
+    _output_dir = _input_dir / "predictions"
+    _model_dir  = DEFAULT_MODEL_PATH.parent
+    new_predictions(_input_dir, _output_dir, _model_dir)

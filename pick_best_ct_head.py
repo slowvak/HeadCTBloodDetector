@@ -1060,6 +1060,52 @@ def copy_best_series_dicoms(input_dir: str, series_uid: str, copy_dir: str):
             continue
     
     print(f"Copied {copied_count} DICOM files to {copy_dir}")
+    
+    if copied_count > 0:
+        try:
+            import dicom2nifti
+            import re
+            
+            input_dir_name = Path(input_dir).name
+            match = re.search(r'\d+$', input_dir_name)
+            if match:
+                nnn = f"{int(match.group()):03d}"
+                nii_filename = f"CQ500_{nnn}.nii.gz"
+            else:
+                nii_filename = f"{input_dir_name}.nii.gz"
+                
+            nii_out_path = copy_dir_path / nii_filename
+            print(f"Converting copied DICOMs to NIfTI: {nii_filename} ...")
+            
+            # Disable strict checks to allow gantry tilt / non-cubical images
+            import dicom2nifti.settings as settings
+            settings.disable_validate_slice_increment()
+            settings.disable_validate_orthogonal()
+            
+            dicom2nifti.dicom_series_to_nifti(str(copy_dir_path), str(nii_out_path), reorient_nifti=True)
+            print(f"Successfully created NIfTI file: {nii_out_path}")
+            
+            # Clean up the DICOM files
+            for dicom_file in copy_dir_path.glob('*.dcm'):
+                try:
+                    dicom_file.unlink()
+                except Exception as e:
+                    print(f"Failed to delete {dicom_file}: {e}")
+            # Also clean up files without extensions that were copied
+            for dicom_file in dicom_files:
+                copied_file = copy_dir_path / dicom_file.name
+                if copied_file.exists() and copied_file.is_file():
+                    try:
+                        copied_file.unlink()
+                    except:
+                        pass
+            print(f"Cleaned up {copied_count} DICOM files after NIfTI conversion.")
+        except ImportError:
+            print("Warning: dicom2nifti is not installed. Cannot convert to NIfTI.")
+            print("Install with: pip install dicom2nifti")
+        except Exception as e:
+            print(f"Error converting to NIfTI: {e}")
+
     return copied_count
 
 
@@ -1157,7 +1203,7 @@ def write_results_excel(results: List[Dict], output_path: str):
     print(f"\nResults written to: {output_path}")
 
 
-def main(input_path, copy_dir=None, orient=None, kernel=None, iv_contrast=None, desired_spacing=None,
+def main(input_path, copy_dir=None, orient=None, kernel=None, iv_contrast=None, desired_spacing=2.0,
          orient_required=False, kernel_required=False, iv_contrast_required=False,
          min_spacing=None, max_spacing=None):
     """Main processing function.
@@ -1227,8 +1273,12 @@ def main(input_path, copy_dir=None, orient=None, kernel=None, iv_contrast=None, 
                                 compute_new_info()
                                 prioritizer = SeriesPrioritizer(temp_dataset, orient=orient, kernel=kernel, iv_contrast=iv_contrast, spacing=desired_spacing, orient_required=orient_required, kernel_required=kernel_required, iv_contrast_required=iv_contrast_required, min_spacing=min_spacing, max_spacing=max_spacing)
                                 prioritizer.print_all_series_ranked()
-                                if copy_dir  != None:
-                                    prioritizer.copy_best_series(copy_dir)
+                                if copy_dir != None:
+                                    ranked_temp = prioritizer.get_all_series_ranked()
+                                    if ranked_temp:
+                                        best_uid = ranked_temp[0].get_series_instance_uid()
+                                        if best_uid:
+                                            copy_best_series_dicoms(input_path, best_uid, os.path.join(input_path, copy_dir))
                             else:
                                 print(f"Failed to process CSV file: {csv_file}")
                         return []
@@ -1271,7 +1321,11 @@ def main(input_path, copy_dir=None, orient=None, kernel=None, iv_contrast=None, 
             print(f"Final dataset: {dataset}")
             
             # Run series prioritization
-            prioritizer = SeriesPrioritizer(dataset, orient=orient, kernel=kernel, iv_contrast=iv_contrast, spacing=desired_spacing, orient_required=orient_required, kernel_required=kernel_required, iv_contrast_required=iv_contrast_required, min_spacing=min_spacing, max_spacing=max_spacing)
+            prioritizer = SeriesPrioritizer(dataset, orient=orient, kernel=kernel, 
+                                            iv_contrast=iv_contrast, spacing=desired_spacing, 
+                                            orient_required=orient_required, kernel_required=kernel_required, 
+                                            iv_contrast_required=iv_contrast_required, min_spacing=min_spacing, 
+                                            max_spacing=max_spacing)
             prioritizer.print_all_series_ranked()
             
             # Build results for Excel export
@@ -1357,6 +1411,49 @@ def main(input_path, copy_dir=None, orient=None, kernel=None, iv_contrast=None, 
     return []
 
 
+def gather_nifti_files(input_base_path: str, out_dir: str = '~/Desktop/CQ500_NII/'):
+    """
+    Go through each subfolder of input_base_path, look for a 'NII_test' directory,
+    and if exactly one *.nii.gz file is found, copy it to out_dir.
+    """
+    out_path = Path(out_dir).expanduser()
+    out_path.mkdir(parents=True, exist_ok=True)
+    base_path = Path(input_base_path)
+    
+    if not base_path.exists() or not base_path.is_dir():
+        print(f"Error: {input_base_path} is not a valid directory.")
+        return
+        
+    copied = 0
+    print(f"\nGathering NIfTI files to {out_path}...")
+    for sub in base_path.iterdir():
+        if sub.is_dir():
+            nii_test_dir = sub / 'NII_test'
+            if nii_test_dir.exists() and nii_test_dir.is_dir():
+                nii_files = list(nii_test_dir.glob('*.nii.gz'))
+                if len(nii_files) == 1:
+                    src = nii_files[0]
+                    dest = out_path / src.name
+                    
+                    # Handle duplicate filenames
+                    counter = 1
+                    dest_name_str = str(dest.name)
+                    stem = dest_name_str.replace('.nii.gz', '') if dest_name_str.endswith('.nii.gz') else dest.stem
+                    ext = ".nii.gz" if dest_name_str.endswith('.nii.gz') else dest.suffix
+                    while dest.exists():
+                        dest = out_path / f"{stem}_{counter}{ext}"
+                        counter += 1
+                        
+                    try:
+                        shutil.copy2(src, dest)
+                        copied += 1
+                    except Exception as e:
+                        print(f"Failed to copy {src.name}: {e}")
+                elif len(nii_files) > 1:
+                    print(f"Warning: Multiple .nii.gz files found in {nii_test_dir}. Skipping.")
+
+    print(f"Done. Copied {copied} NIfTI files to {out_path}.")
+
 if __name__ == "__main__":
 
     # if len(sys.argv) < 2:
@@ -1408,12 +1505,12 @@ if __name__ == "__main__":
             # Spacing range filter (set to None to disable):
             #   min_spacing: Minimum acceptable slice spacing in mm
             #   max_spacing: Maximum acceptable slice spacing in mm
-            results = main(sub_dir, copy_dir='NII',
+            results = main(sub_dir, copy_dir='NII_test',
                  orient='AXL',       orient_required=True,
                  kernel='SOFT',      kernel_required=False,
                  iv_contrast=None,   iv_contrast_required=True,
-                 desired_spacing=3,
-                 min_spacing=2.0, max_spacing=6.0)
+                 desired_spacing=2,
+                 min_spacing=0.5, max_spacing=6.0)
             if results:
                 all_results.extend(results)
     
@@ -1421,3 +1518,6 @@ if __name__ == "__main__":
     if all_results:
         excel_path = os.path.join(input_path, 'series_rankings.xlsx')
         write_results_excel(all_results, excel_path)
+        
+    # Gather output NIfTI files to Desktop
+    gather_nifti_files(input_path)
